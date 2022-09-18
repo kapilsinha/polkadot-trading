@@ -1,0 +1,14 @@
+# Python 
+.ipynb_checkpoints/
+__pycache__/
+
+# Virtualenv files
+.venv/
+.nixvenv/
+
+# Output files
+out/*.csv
+out/*.feather
+
+# Env variables
+trading_env

@@ -1,0 +1,29 @@
+Stablecoins:
+- BUSD -> Binance USD, bridged via Multichain
+- DAI -> Ethereum, bridged via Multichain
+- FRAX -> Frax Finance, Moonbeam-native (integration) I think
+- MAI -> Multichain, Moonbeam-native (integration) I think
+- USDC_multi -> Ethereum, bridged via Multichain
+- USDC_nomad -> Ethereum, bridged via Multichain
+- USDT -> Ethereum, bridged via Multichain
+- xcaUSD -> Acala (Polkadot parachain) dollar
+
+Moonbeam-native tokens:
+- WGLMR -> Moonbeam | Binance GLMR/USDT
+- STELLA -> StellaSwap
+- WELL -> Moonwell
+
+Polkadot (cross-chain transfer) tokens:
+- xcDOT -> Polkadot | Binance DOT/USDT
+- xcINTR -> Interlay | Gate.io INTR/USDT (MEXC has higher trade volume but no historical data)
+
+Bridged tokens from other blockchains
+- AVAX -> Avalanche, bridged via Multichain | Binance AVAX/USDT
+- axlATOM -> Cosmos, bridged via Axelar Satellite | Binance ATOM/USDT
+- BNB -> Binance Coin, bridged via Multichain | Binance BNB/USDT
+- ETH -> (wrapped) Ethereum, bridged via Multichain | Binance ETH/BUSD, ETH/USDT
+- FTM -> Fantom, bridged via Multichain | Binance FTM/USDT
+- MATIC -> Polygon, bridged via Multichain | Binance MATIC/USDT
+- WBTC -> wrapped Bitcoin, bridged via Nomad
+- WETH -> wrapped Ethereum, bridged via Nomad
+
