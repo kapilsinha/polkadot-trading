@@ -43,21 +43,24 @@ strategy:
       allow_consecutive_same_side_orders: false
       allow_opposite_side_order_to_close: true
       allowance:
-        "0xfA9343C3897324496A05fC75abeD6bAC29f8A40f": 1000000000000000 # ETH_multi
-        "0x818ec0A7Fe18Ff94269904fCED6AE3DaE6d6dC0b": 2000000 # USDC_multi
-      risk: 0.5
+        "0xfA9343C3897324496A05fC75abeD6bAC29f8A40f": 130000000000000000 # ETH_multi
+        "0x818ec0A7Fe18Ff94269904fCED6AE3DaE6d6dC0b": 30000000 # USDC_multi
+      risk: 0.9
       max_our_trade_impact_rate_bps: 15
       binance_quote_calculation:
+        # numerator:
+        #   type: "stellaswap"
+        #   token_address: "0x818ec0A7Fe18Ff94269904fCED6AE3DaE6d6dC0b"
         numerator:
-          type: "stellaswap"
-          token_address: "0x818ec0A7Fe18Ff94269904fCED6AE3DaE6d6dC0b"
+          type: "constant"
+          value: 1
         denominator:
           type: "binance"
           symbol: "ETHUSDT"
           # price_data_pull_rate_seconds: 3 # only used in prod
-          # smoothed_price_{t+1} = new_price * (1 - factor) + smoothed_price * factor
-          # i.e. factor = 0 no smoothing; 1 means the smoothed price never updates
-          price_exp_smooth_factor: 0
+          # smoothed_price_{t+1} = new_price * factor + smoothed_price * (1 - factor)
+          # i.e. factor = 1 no smoothing; 0 means the smoothed price never updates
+          price_exp_smooth_factor: 0.1 # 1
       trigger_open_order:
         name: "price_movement_predictor"
         alpha_bps: 100
@@ -69,14 +72,14 @@ strategy:
         # should add an alpha component or smoothen the stella price
         # - name: "price_stop_loss"
         #   price_delta_bps: -50
-        # - name: "alpha_target"
-        #   alpha_bps: -25
+        # - name: "alpha_reversal"
+        #   alpha_bps: -40
         - name: "combined_price_alpha_decay_target" # AND of the following conditions
           price_delta_bps: 50
-          alpha_bps: 0
+          alpha_bps: 15
         - name: "combined_price_alpha_growth_target" # AND of the following conditions
-          price_delta_bps: 75
-          alpha_bps: 50
+          price_delta_bps: 85
+          alpha_bps: 35
         - name: "combined_price_alpha_stop_loss" # AND of the following conditions
           price_delta_bps: -25
-          alpha_bps: 50
+          alpha_bps: 30

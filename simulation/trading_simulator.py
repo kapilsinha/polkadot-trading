@@ -40,6 +40,7 @@ class StateManager:
             **dict(zip(df.token1_address, df.token1_decimals)),
         }
 
+        self.start_address_to_token_holdings: DefaultDict[str, int] = address_to_token_holdings.copy()
         self.address_to_token_holdings: DefaultDict[str, int] = address_to_token_holdings
         self.address_to_token_pair: Dict[str, TokenPair] = {
             pair_address: TokenPair(pair_address, token0, token1) for pair_address, token0, token1 \
@@ -206,7 +207,8 @@ class PnlCalculator:
         self.total_exec_pnl = 0
         self.trade_id_to_exec_pnl = {}
         
-        self.token_to_holding_value = {}
+        self.start_token_to_holding_usd_value: Optional[Dict[str, float]] = None
+        self.token_to_holding_usd_value: Dict[str, float] = {}
         self.prev_total_pnl = 0
         self.total_pnl = 0
 
@@ -227,8 +229,10 @@ class PnlCalculator:
         total_value = 0
         for token, holding in state_manager.address_to_token_holdings.items():
             holding_value = holding * state_manager.address_to_token[token].get_usd_value()
-            self.token_to_holding_value[token] = holding_value
+            self.token_to_holding_usd_value[token] = holding_value
             total_value += holding_value
+        if self.start_token_to_holding_usd_value is None:
+            self.start_token_to_holding_usd_value = self.token_to_holding_usd_value.copy()
         return total_value
     
     # We consider this an 'execution pnl' but I think it's a bad metric. Legacy from the cyclic arbitrage strat
@@ -314,9 +318,15 @@ class SimDriver:
             self._process_dfs(stellaswap_df, binance_dfs)
         
         self.pnl_calculator.calc_pnl(self.state_manager, [])
-        logging.info(f'Start holdings value: ${self.pnl_calculator.start_holdings_value:0.2f}')
-        logging.info(f'End holdings value: ${self.pnl_calculator.cur_holdings_value:0.2f}')
-        logging.info(f'Total PnL: ${self.pnl_calculator.total_pnl:0.2f}')
+        logging.info(f'Start holdings value: ${self.pnl_calculator.start_holdings_value:0.2f} '
+                     f'({self.format_token_to_usd(self.pnl_calculator.start_token_to_holding_usd_value)})')
+        logging.info(f'End holdings value: ${self.pnl_calculator.cur_holdings_value:0.2f}'
+                     f'({self.format_token_to_usd(self.pnl_calculator.token_to_holding_usd_value)})')
+        
+        token_to_delta_usd_value = self._calc_token_to_delta_usd_value()
+        logging.info(f'Actual total PnL: ${self.pnl_calculator.total_pnl:0.2f}')
+        logging.info(f'Total PnL (compared to doing nothing): ${sum(token_to_delta_usd_value.values()):0.2f} '
+                     f'({self.format_token_to_usd(token_to_delta_usd_value)})')
 
     def _process_dfs(self, stellaswap_df: pd.DataFrame, binance_dfs: Dict[str, pd.DataFrame]):
         def is_chunk_full_snapshot(block_number, txn_index):
@@ -412,12 +422,35 @@ class SimDriver:
 
             self.pnl_calculator.calc_pnl(self.state_manager, new_trades)
 
+            # TODO: This belongs in PnlCalculator but I don't know what to call this metric. Find a name and move
+            # I hate this name exec2_pnl
+            token_to_delta_usd_value = self._calc_token_to_delta_usd_value()
+            cumulative_exec2_pnl = sum(token_to_delta_usd_value.values())
+            logging.info(f'Total PnL (compared to doing nothing): ${sum(token_to_delta_usd_value.values()):0.2f} '
+                         f'({self.format_token_to_usd(token_to_delta_usd_value)})')
+
             logging.info(f'Block {block_number}, txn {txn_index}: orders = {new_orders}')
             logging.info(f'Block {block_number}, txn {txn_index}: trades =' \
                         f'{ [f"{t} (pnl=${self.pnl_calculator.trade_id_to_exec_pnl[t.trade_id]})" for t in new_trades] }')
-            logging.info(f'Block {block_number}, holding values = ' \
-                        f'{self.pnl_calculator.token_to_holding_value}')
+            logging.info(f'Block {block_number}, holding $ values = ' \
+                        f'{self.pnl_calculator.token_to_holding_usd_value}')
             logging.info(f'Block {block_number}, txn {txn_index}: '
-                        f'total_pnl_delta_since_last_trades=${(self.pnl_calculator.total_pnl - self.pnl_calculator.prev_total_pnl):0.2f}, '
-                        f'cumulative_exec_pnl=${self.pnl_calculator.total_exec_pnl:0.2f}, '
-                        f'cumulative_total_pnl=${self.pnl_calculator.total_pnl:0.2f}\n')
+                        # f'total_pnl_delta_since_last_trades=${(self.pnl_calculator.total_pnl - self.pnl_calculator.prev_total_pnl):0.2f}, '
+                        # f'cumulative_exec_pnl=${self.pnl_calculator.total_exec_pnl:0.2f}, '
+                        # f'cumulative_total_pnl=${self.pnl_calculator.total_pnl:0.2f}, '
+                        f'cumulative_exec2_pnl=${cumulative_exec2_pnl}, '
+                        f'({self.format_token_to_usd(token_to_delta_usd_value)})\n')
+
+    def _calc_token_to_delta_usd_value(self):
+        token_to_delta_usd_value = {}
+        for token in self.state_manager.address_to_token_holdings.keys():
+            delta_token_holdings = self.state_manager.address_to_token_holdings[token] \
+                - self.state_manager.start_address_to_token_holdings[token]
+            delta_token_usd = self.state_manager.address_to_token[token].get_usd_value() * delta_token_holdings
+            if delta_token_usd != 0:
+                token_to_delta_usd_value[token] = delta_token_usd
+        return token_to_delta_usd_value
+
+    @staticmethod
+    def format_token_to_usd(token_to_usd):
+        return {k: f'${v:0.2f}' for k, v in token_to_usd.items()}

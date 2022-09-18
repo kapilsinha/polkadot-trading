@@ -4,7 +4,7 @@ from simulation.trading_simulator import Order, StateManager, Strategy, Trade
 from simulation.sim_types import Token, TokenPair
 
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from glob import glob
 import logging
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -26,6 +26,12 @@ class TokenPosition:
     allowance: float
     cumulative_position_delta: float = 0
     open_position_amount: float = 0
+
+@dataclass(frozen=True)
+class AlphaContainer:
+    alpha_bps: float
+    binance_price: float
+    stellaswap_price: float
 
 class BinanceAlphaTokenPairStrategy(Strategy):
 
@@ -68,12 +74,12 @@ class BinanceAlphaTokenPairStrategy(Strategy):
         self.order_id_to_alpha_direction: Dict[int, AlphaDirection] = {}
     
     def on_state_update(self, state_manager: StateManager) -> List[Order]:
-        alpha_bps = self.compute_binance_alpha_bps(state_manager)
-        if alpha_bps is None:
+        alpha = self.compute_binance_alpha(state_manager)
+        if alpha is None:
             logging.warning('Binance alpha is null (not yet initialized)...')
             return []
         should_open_position, new_direction = \
-            self.trigger_container.should_open_position_and_direction(alpha_bps=alpha_bps)
+            self.trigger_container.should_open_position_and_direction(alpha_bps=alpha.alpha_bps)
 
         orders = []
         if self.open_position_alpha_direction is not None:
@@ -82,11 +88,11 @@ class BinanceAlphaTokenPairStrategy(Strategy):
                 # If we can open a position in the opposite direction to effectively close the current
                 # open position, we choose to do so because it is more efficient than closing the current
                 # position and then opening a position on the opposite side (one txn instead of two).
-                orders = self._generate_open_order(state_manager, new_direction, alpha_bps)
-            elif self.trigger_container.should_close_position(alpha_bps, self._get_quote(state_manager)):
-                orders = self._generate_close_order(state_manager, alpha_bps)
+                orders = self._generate_open_order(state_manager, new_direction, alpha)
+            elif self.trigger_container.should_close_position(alpha.alpha_bps, self._get_quote(state_manager)):
+                orders = self._generate_close_order(state_manager, alpha)
         elif should_open_position:
-            orders = self._generate_open_order(state_manager, new_direction, alpha_bps)
+            orders = self._generate_open_order(state_manager, new_direction, alpha)
                     
         return orders
 
@@ -98,8 +104,8 @@ class BinanceAlphaTokenPairStrategy(Strategy):
         if binance_symbol not in self.binance_symbol_to_smooth_price:
             self.binance_symbol_to_smooth_price[binance_symbol] = binance_price
         else:
-            self.binance_symbol_to_smooth_price[binance_symbol] = binance_price * (1 - price_exp_smooth_factor) \
-                + self.binance_symbol_to_smooth_price[binance_symbol] * price_exp_smooth_factor
+            self.binance_symbol_to_smooth_price[binance_symbol] = binance_price * price_exp_smooth_factor \
+                + self.binance_symbol_to_smooth_price[binance_symbol] * (1 - price_exp_smooth_factor)
         
         return self.on_state_update(state_manager)
 
@@ -136,7 +142,7 @@ class BinanceAlphaTokenPairStrategy(Strategy):
         assert(self.token0_pos.allowance + self.token0_pos.cumulative_position_delta >= 0)
         assert(self.token1_pos.allowance + self.token1_pos.cumulative_position_delta >= 0)
 
-    def compute_binance_alpha_bps(self, state_manager: StateManager):
+    def compute_binance_alpha(self, state_manager: StateManager) -> Optional[AlphaContainer]:
         def helper(binance_price, stellaswap_price):
             return 10_000 * (binance_price - stellaswap_price) / binance_price
         
@@ -144,15 +150,24 @@ class BinanceAlphaTokenPairStrategy(Strategy):
         if binance_price is None:
             return None
         stellaswap_price = self._get_quote(state_manager)
-        return helper(binance_price, stellaswap_price)
+        alpha_bps = helper(binance_price, stellaswap_price)
+        return AlphaContainer(
+            alpha_bps=alpha_bps,
+            binance_price=binance_price,
+            stellaswap_price=stellaswap_price,
+        )
 
     def _compute_binance_token_pair_price(self, state_manager: StateManager):
         def get_component_price(cfg):
             if cfg['type'] == 'binance':
                 return self.binance_symbol_to_smooth_price.get(cfg['symbol'])
             if cfg['type'] == 'stellaswap':
+                # Note that the USDC.usd_value() fluctuates a decent bit because any large trade changes it drastically
+                # So it needs to be smoothed!
                 decimals = state_manager.address_to_token_decimals[cfg['token_address']]
                 return state_manager.address_to_token[cfg['token_address']].get_usd_value() * 10**decimals
+            if cfg['type'] == 'constant':
+                return cfg['value']
             raise ValueError('Should not reach here')
 
         num = get_component_price(self.binance_quote_cfg['numerator'])
@@ -169,7 +184,7 @@ class BinanceAlphaTokenPairStrategy(Strategy):
             self,
             state_manager: StateManager,
             alpha_direction: AlphaDirection,
-            alpha_bps: float) -> List[Order]:
+            alpha: AlphaContainer) -> List[Order]:
         token_pair = state_manager.address_to_token_pair[self.pair_address]
         if alpha_direction == AlphaDirection.BULLISH:
             trade_direction = Direction.REVERSE
@@ -191,10 +206,10 @@ class BinanceAlphaTokenPairStrategy(Strategy):
             self.risk * (in_token_pos.allowance + in_token_pos.cumulative_position_delta),
             max_amount_in,
         )
-        new_order = self._create_order(amount_in, path, alpha_direction, state_manager, alpha_bps)
+        new_order = self._create_order(amount_in, path, alpha_direction, state_manager, alpha)
         return [new_order]
 
-    def _generate_close_order(self, state_manager: StateManager, alpha_bps: float) -> List[Order]:
+    def _generate_close_order(self, state_manager: StateManager, alpha: AlphaContainer) -> List[Order]:
         token_pair = state_manager.address_to_token_pair[self.pair_address]
         if self.open_position_alpha_direction == AlphaDirection.BULLISH:
             # Forward direction trade to close the position
@@ -207,13 +222,13 @@ class BinanceAlphaTokenPairStrategy(Strategy):
             raise ValueError('Attempting to close a position but open position is null')
         
         assert(amount_in > 0)
-        new_order = self._create_order(amount_in, path, None, state_manager, alpha_bps)
+        new_order = self._create_order(amount_in, path, None, state_manager, alpha)
         return [new_order]
 
     def _create_order(self, amount_in: float, path: List[str],
                       new_alpha_direction: Optional[AlphaDirection],
                       state_manager: StateManager,
-                      alpha_bps: float) -> Order:
+                      alpha: AlphaContainer) -> Order:
         order = Order(
             order_id=state_manager.generate_order_id(),
             amount_in=amount_in,
@@ -222,8 +237,7 @@ class BinanceAlphaTokenPairStrategy(Strategy):
             last_txn_index=state_manager.last_txn_index,
             metadata={
                 'input_usd_notional': amount_in * state_manager.address_to_token[path[0]].get_usd_value(),
-                'alpha_bps': alpha_bps,
-                'cur_price': self._get_quote(state_manager),
+                **asdict(alpha),
             },
         )
         self.order_id_to_alpha_direction[order.order_id] = new_alpha_direction
@@ -261,15 +275,12 @@ if __name__ == '__main__':
     )
 
     files = [
-        'data/stellaswap_txn_history/all//stellaswap_data_1740000_1749999.feather',
-        # 'data/stellaswap_txn_history/all/stellaswap_data_1750000_1759999.feather',
-        # 'data/stellaswap_txn_history/all/stellaswap_data_1760000_1769999.feather',
+        f'data/stellaswap_txn_history/all/stellaswap_data_{x}0000_{x}9999.feather' for x in range(175, 185)
     ]
     binance_symbol_to_data_feather_files = {
-        'ETHUSDT': [
-            'data/binance_history/eth_usdt/processed/binance_data_1740000_1749999.feather',
-            # 'data/binance_history/eth_usdt/processed/binance_data_1750000_1759999.feather',
-            # 'data/binance_history/eth_usdt/processed/binance_data_1760000_1769999.feather',
-        ]
+        'ETHUSDT': [f.replace(
+                'data/stellaswap_txn_history/all/stellaswap_data',
+                'data/binance_history/eth_usdt/processed/binance_data'
+            ) for f in files]
     }
     sim_driver.process_files(files, binance_symbol_to_data_feather_files)
