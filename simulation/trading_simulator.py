@@ -40,7 +40,7 @@ class StateManager:
             **dict(zip(df.token1_address, df.token1_decimals)),
         }
 
-        self.start_address_to_token_holdings: DefaultDict[str, int] = address_to_token_holdings.copy()
+        self.address_to_start_token_holdings: DefaultDict[str, int] = address_to_token_holdings.copy()
         self.address_to_token_holdings: DefaultDict[str, int] = address_to_token_holdings
         self.address_to_token_pair: Dict[str, TokenPair] = {
             pair_address: TokenPair(pair_address, token0, token1) for pair_address, token0, token1 \
@@ -91,6 +91,18 @@ class StateManager:
 
         self.last_swaps = data[data.row_type == DataRowType.SWAP_TXN]
         self.last_txn_index = txn_index
+    
+    def get_readable_start_holdings(self):
+        return {
+            token_address: f'${self.address_to_token[token_address].get_usd_value() * holdings} ({holdings} wei)' \
+                for token_address, holdings in self.address_to_start_token_holdings.items()
+        }
+
+    def get_readable_holdings(self):
+        return {
+            token_address: f'${self.address_to_token[token_address].get_usd_value() * holdings} ({holdings} wei)' \
+                for token_address, holdings in self.address_to_token_holdings.items()
+        }
 
 
 class FillEngine:
@@ -121,13 +133,9 @@ class FillEngine:
         
         if state_manager.address_to_token_holdings[token_pair.token0_address] < 0 or \
             state_manager.address_to_token_holdings[token_pair.token1_address] < 0:
-            readable_holdings = {
-                token_address: f'${state_manager.address_to_token[token_address].get_usd_value() * holdings} ({holdings} wei)' \
-                    for token_address, holdings in state_manager.address_to_token_holdings.items()
-            }
             logging.error(
                 f'Holdings went below 0. You cannot sell what you do not have. The strategy violates holdings constraints.\n'
-                f'Holdings: {readable_holdings}\n'
+                f'Holdings: {state_manager.get_readable_holdings()}\n'
                 f'Violating trade: {trade}'
             )
             raise ValueError('Holdings for tokens went below 0')
@@ -167,11 +175,11 @@ class FillEngine:
                 pair_address = state_manager.tokens_to_pair[(start_token, end_token)]
                 token_pair = state_manager.address_to_token_pair[pair_address]
                 if start_token == token_pair.token0_address and end_token == token_pair.token1_address:
-                    amount_out = token_pair.quote_with_fees(Direction.FORWARD, amount_in)
+                    amount_out = int(token_pair.quote_with_fees(Direction.FORWARD, amount_in))
                     amount0_delta = amount_in
                     amount1_delta = -amount_out
                 elif start_token == token_pair.token1_address and end_token == token_pair.token0_address:
-                    amount_out = token_pair.quote_with_fees(Direction.REVERSE, amount_in)
+                    amount_out = int(token_pair.quote_with_fees(Direction.REVERSE, amount_in))
                     amount0_delta = -amount_out
                     amount1_delta = amount_in
                 else:
@@ -207,8 +215,6 @@ class PnlCalculator:
         self.total_exec_pnl = 0
         self.trade_id_to_exec_pnl = {}
         
-        self.start_token_to_holding_usd_value: Optional[Dict[str, float]] = None
-        self.token_to_holding_usd_value: Dict[str, float] = {}
         self.prev_total_pnl = 0
         self.total_pnl = 0
 
@@ -228,11 +234,7 @@ class PnlCalculator:
     def calc_holdings_value(self, state_manager: StateManager):
         total_value = 0
         for token, holding in state_manager.address_to_token_holdings.items():
-            holding_value = holding * state_manager.address_to_token[token].get_usd_value()
-            self.token_to_holding_usd_value[token] = holding_value
-            total_value += holding_value
-        if self.start_token_to_holding_usd_value is None:
-            self.start_token_to_holding_usd_value = self.token_to_holding_usd_value.copy()
+            total_value += holding * state_manager.address_to_token[token].get_usd_value()
         return total_value
     
     # We consider this an 'execution pnl' but I think it's a bad metric. Legacy from the cyclic arbitrage strat
@@ -319,9 +321,9 @@ class SimDriver:
         
         self.pnl_calculator.calc_pnl(self.state_manager, [])
         logging.info(f'Start holdings value: ${self.pnl_calculator.start_holdings_value:0.2f} '
-                     f'({self.format_token_to_usd(self.pnl_calculator.start_token_to_holding_usd_value)})')
+                     f'({self.state_manager.get_readable_start_holdings()})')
         logging.info(f'End holdings value: ${self.pnl_calculator.cur_holdings_value:0.2f}'
-                     f'({self.format_token_to_usd(self.pnl_calculator.token_to_holding_usd_value)})')
+                     f'({self.state_manager.get_readable_holdings()})')
         
         token_to_delta_usd_value = self._calc_token_to_delta_usd_value()
         logging.info(f'Actual total PnL: ${self.pnl_calculator.total_pnl:0.2f}')
@@ -429,20 +431,19 @@ class SimDriver:
             logging.info(f'Block {block_number}, txn {txn_index}: orders = {new_orders}')
             logging.info(f'Block {block_number}, txn {txn_index}: trades =' \
                         f'{ [f"{t} (pnl=${self.pnl_calculator.trade_id_to_exec_pnl[t.trade_id]})" for t in new_trades] }')
-            logging.info(f'Block {block_number}, holding $ values = ' \
-                        f'{self.pnl_calculator.token_to_holding_usd_value}')
+            logging.info(f'Block {block_number}, holdings = {self.state_manager.get_readable_holdings()}')
             logging.info(f'Block {block_number}, txn {txn_index}: '
                         # f'total_pnl_delta_since_last_trades=${(self.pnl_calculator.total_pnl - self.pnl_calculator.prev_total_pnl):0.2f}, '
                         # f'cumulative_exec_pnl=${self.pnl_calculator.total_exec_pnl:0.2f}, '
                         # f'cumulative_total_pnl=${self.pnl_calculator.total_pnl:0.2f}, '
-                        f'cumulative_exec2_pnl=${cumulative_exec2_pnl}, '
+                        f'cumulative_exec2_pnl=${cumulative_exec2_pnl:0.2f}, '
                         f'({self.format_token_to_usd(token_to_delta_usd_value)})\n')
 
     def _calc_token_to_delta_usd_value(self):
         token_to_delta_usd_value = {}
         for token in self.state_manager.address_to_token_holdings.keys():
             delta_token_holdings = self.state_manager.address_to_token_holdings[token] \
-                - self.state_manager.start_address_to_token_holdings[token]
+                - self.state_manager.address_to_start_token_holdings[token]
             delta_token_usd = self.state_manager.address_to_token[token].get_usd_value() * delta_token_holdings
             if delta_token_usd != 0:
                 token_to_delta_usd_value[token] = delta_token_usd

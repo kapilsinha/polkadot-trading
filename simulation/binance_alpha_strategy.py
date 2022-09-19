@@ -157,16 +157,17 @@ class BinanceAlphaTokenPairStrategy(Strategy):
             # allow_opposite_side_order_to_close enabled
             self.trigger_container.create_close_triggers(
                 self.open_position_alpha_direction, self._get_quote(state_manager))
-            self.token0_pos.open_position_amount = -new_trade.amount0_delta
-            self.token1_pos.open_position_amount = -new_trade.amount1_delta
+            # Note that we CANNOT just set open_pos_amount to the new_trade_amount_delta
+            # if we did an opposite-side order instead of closing the original one
+            self.token0_pos.open_position_amount -= new_trade.amount0_delta
+            self.token1_pos.open_position_amount -= new_trade.amount1_delta
         else:
             self.trigger_container.clear_close_triggers()
-            if self.token0_pos.open_position_amount > 0:
-                assert(self.token0_pos.open_position_amount - new_trade.amount0_delta == 0)
-            elif self.token1_pos.open_position_amount > 0:
-                assert(self.token1_pos.open_position_amount - new_trade.amount1_delta == 0)
-            else:
-                raise ValueError('One of token0 or token1 open positions should have been positive')
+            assert(any((
+                self.token0_pos.open_position_amount - new_trade.amount0_delta == 0,
+                self.token1_pos.open_position_amount - new_trade.amount1_delta == 0,
+            )))
+
             # The side that we just bought likely does not match amount_delta exactly, which accounts
             # for any profit or loss we made between the position's open and close
             self.token0_pos.open_position_amount = 0
@@ -236,9 +237,10 @@ class BinanceAlphaTokenPairStrategy(Strategy):
         _trade_dir, max_amount_in, _ = token_pair.compute_trade_for_target_forward_quote(limit_price)
         assert(_trade_dir == trade_direction)
 
+        # Need to cast to int since wei is all in ints
         amount_in = min(
-            self.risk * (in_token_pos.allowance + in_token_pos.cumulative_position_delta),
-            max_amount_in,
+            int(self.risk * (in_token_pos.allowance + in_token_pos.cumulative_position_delta)),
+            int(max_amount_in),
         )
         new_order = self._create_order(amount_in, path, state_manager, alpha)
         return [new_order]
@@ -259,7 +261,7 @@ class BinanceAlphaTokenPairStrategy(Strategy):
         new_order = self._create_order(amount_in, path, state_manager, alpha)
         return [new_order]
 
-    def _create_order(self, amount_in: float, path: List[str],
+    def _create_order(self, amount_in: int, path: List[str],
                       state_manager: StateManager,
                       alpha: AlphaContainer) -> Order:
         order = Order(
