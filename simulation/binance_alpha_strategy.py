@@ -1,5 +1,5 @@
 from common.enums import AlphaDirection, Direction
-from common.trigger import TriggerContainer
+from common.trigger import ShouldCloseDecision, ShouldOpenDecision, TriggerContainer
 from simulation.trading_simulator import Order, StateManager, Strategy, Trade
 from simulation.sim_types import Token, TokenPair
 
@@ -7,7 +7,7 @@ from collections import defaultdict
 from dataclasses import asdict, dataclass
 from glob import glob
 import logging
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional
 
 
 logging.basicConfig(
@@ -28,10 +28,39 @@ class TokenPosition:
     open_position_amount: float = 0
 
 @dataclass(frozen=True)
-class AlphaContainer:
+class SimpleAlphaContainer:
     alpha_bps: float
     binance_price: float
     stellaswap_price: float
+
+@dataclass(frozen=True)
+class AlphaContainer(SimpleAlphaContainer):
+    trigger_name: str
+    alpha_direction: Optional[AlphaDirection]
+
+    @staticmethod
+    def create_from_open_decision(
+        simple_alpha: SimpleAlphaContainer, open_decision: ShouldOpenDecision
+    ):
+        return AlphaContainer(
+            alpha_bps=simple_alpha.alpha_bps,
+            binance_price=simple_alpha.binance_price,
+            stellaswap_price=simple_alpha.stellaswap_price,
+            trigger_name=open_decision.trigger_name,
+            alpha_direction=open_decision.alpha_direction,
+        )
+
+    @staticmethod
+    def create_from_close_decision(
+        simple_alpha: SimpleAlphaContainer, close_decision: ShouldCloseDecision
+    ):
+        return AlphaContainer(
+            alpha_bps=simple_alpha.alpha_bps,
+            binance_price=simple_alpha.binance_price,
+            stellaswap_price=simple_alpha.stellaswap_price,
+            trigger_name=close_decision.trigger_name,
+            alpha_direction=None,
+        )
 
 class BinanceAlphaTokenPairStrategy(Strategy):
 
@@ -74,25 +103,31 @@ class BinanceAlphaTokenPairStrategy(Strategy):
         self.order_id_to_alpha_direction: Dict[int, AlphaDirection] = {}
     
     def on_state_update(self, state_manager: StateManager) -> List[Order]:
-        alpha = self.compute_binance_alpha(state_manager)
-        if alpha is None:
+        simple_alpha = self.compute_binance_alpha(state_manager)
+        if simple_alpha is None:
             logging.warning('Binance alpha is null (not yet initialized)...')
             return []
-        should_open_position, new_direction = \
-            self.trigger_container.should_open_position_and_direction(alpha_bps=alpha.alpha_bps)
+        open_decision = self.trigger_container.decide_should_open_position(alpha_bps=simple_alpha.alpha_bps)
 
         orders = []
         if self.open_position_alpha_direction is not None:
             if self.allow_opposite_side_order_to_close \
-                    and should_open_position and new_direction != self.open_position_alpha_direction:
+                    and open_decision.should_open_position \
+                    and open_decision.alpha_direction != self.open_position_alpha_direction:
                 # If we can open a position in the opposite direction to effectively close the current
                 # open position, we choose to do so because it is more efficient than closing the current
                 # position and then opening a position on the opposite side (one txn instead of two).
-                orders = self._generate_open_order(state_manager, new_direction, alpha)
-            elif self.trigger_container.should_close_position(alpha.alpha_bps, self._get_quote(state_manager)):
-                orders = self._generate_close_order(state_manager, alpha)
-        elif should_open_position:
-            orders = self._generate_open_order(state_manager, new_direction, alpha)
+                alpha = AlphaContainer.create_from_open_decision(simple_alpha, open_decision)
+                orders = self._generate_open_order(state_manager, alpha)
+            else:
+                close_decision = self.trigger_container.decide_should_close_position(
+                    simple_alpha.alpha_bps, self._get_quote(state_manager))
+                if close_decision.should_close_position:
+                    alpha = AlphaContainer.create_from_close_decision(simple_alpha, close_decision)
+                    orders = self._generate_close_order(state_manager, alpha)
+        elif open_decision.should_open_position:
+            alpha = AlphaContainer.create_from_open_decision(simple_alpha, open_decision)
+            orders = self._generate_open_order(state_manager, alpha)
                     
         return orders
 
@@ -151,7 +186,7 @@ class BinanceAlphaTokenPairStrategy(Strategy):
             return None
         stellaswap_price = self._get_quote(state_manager)
         alpha_bps = helper(binance_price, stellaswap_price)
-        return AlphaContainer(
+        return SimpleAlphaContainer(
             alpha_bps=alpha_bps,
             binance_price=binance_price,
             stellaswap_price=stellaswap_price,
@@ -183,15 +218,14 @@ class BinanceAlphaTokenPairStrategy(Strategy):
     def _generate_open_order(
             self,
             state_manager: StateManager,
-            alpha_direction: AlphaDirection,
             alpha: AlphaContainer) -> List[Order]:
         token_pair = state_manager.address_to_token_pair[self.pair_address]
-        if alpha_direction == AlphaDirection.BULLISH:
+        if alpha.alpha_direction == AlphaDirection.BULLISH:
             trade_direction = Direction.REVERSE
             path = [token_pair.token1_address, token_pair.token0_address]
             limit_price = self._get_quote(state_manager) * (1 + self.max_our_trade_impact_rate_bps / 10_000)
             in_token_pos = self.token1_pos
-        elif alpha_direction == AlphaDirection.BEARISH:
+        elif alpha.alpha_direction == AlphaDirection.BEARISH:
             trade_direction = Direction.FORWARD
             path = [token_pair.token0_address, token_pair.token1_address]
             limit_price = self._get_quote(state_manager) * (1 - self.max_our_trade_impact_rate_bps / 10_000)
@@ -206,7 +240,7 @@ class BinanceAlphaTokenPairStrategy(Strategy):
             self.risk * (in_token_pos.allowance + in_token_pos.cumulative_position_delta),
             max_amount_in,
         )
-        new_order = self._create_order(amount_in, path, alpha_direction, state_manager, alpha)
+        new_order = self._create_order(amount_in, path, state_manager, alpha)
         return [new_order]
 
     def _generate_close_order(self, state_manager: StateManager, alpha: AlphaContainer) -> List[Order]:
@@ -222,11 +256,10 @@ class BinanceAlphaTokenPairStrategy(Strategy):
             raise ValueError('Attempting to close a position but open position is null')
         
         assert(amount_in > 0)
-        new_order = self._create_order(amount_in, path, None, state_manager, alpha)
+        new_order = self._create_order(amount_in, path, state_manager, alpha)
         return [new_order]
 
     def _create_order(self, amount_in: float, path: List[str],
-                      new_alpha_direction: Optional[AlphaDirection],
                       state_manager: StateManager,
                       alpha: AlphaContainer) -> Order:
         order = Order(
@@ -240,7 +273,7 @@ class BinanceAlphaTokenPairStrategy(Strategy):
                 **asdict(alpha),
             },
         )
-        self.order_id_to_alpha_direction[order.order_id] = new_alpha_direction
+        self.order_id_to_alpha_direction[order.order_id] = alpha.alpha_direction
         return order
 
     def _get_quote(self, state_manager: StateManager):
@@ -251,9 +284,13 @@ class BinanceAlphaTokenPairStrategy(Strategy):
 if __name__ == '__main__':
     from common.helpers import load_config
     from simulation.trading_simulator import StateManager, FillEngine, PnlCalculator, SimDriver
+    import sys
+
+    config_name = sys.argv[1]
+    logging.info(f'Below results are for {config_name}')
 
     config = load_config(filename='sim_cfg.yaml')
-    strategy_config = config['strategy']['binance_alpha']['usdc_eth']
+    strategy_config = config['strategy']['binance_alpha'][config_name]
 
     token_holdings = defaultdict(int)
     for token_address, holdings in config['venue']['stellaswap']['holdings'].items():
@@ -284,3 +321,4 @@ if __name__ == '__main__':
             ) for f in files]
     }
     sim_driver.process_files(files, binance_symbol_to_data_feather_files)
+    logging.info(f'Above results are for {config_name}')

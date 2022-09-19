@@ -71,6 +71,17 @@ class CloseTrigger:
             self.alpha_bps_trigger_range[0] <= alpha_bps <= self.alpha_bps_trigger_range[1],
         ))
 
+@dataclass(frozen=True)
+class ShouldOpenDecision:
+    should_open_position: bool
+    alpha_direction: Optional[AlphaDirection]
+    trigger_name: Optional[str]
+
+@dataclass(frozen=True)
+class ShouldCloseDecision:
+    should_close_position: bool
+    trigger_name: Optional[str]
+
 class TriggerContainer:
     def __init__(self, config):
         self.open_trigger_cfg = TriggerConfig.create_from_dict(config['trigger_open_order'])
@@ -80,13 +91,15 @@ class TriggerContainer:
         self.close_triggers = None
         self.price_at_open_position = None
 
-    def should_open_position_and_direction(self, alpha_bps: float):
+    def decide_should_open_position(self, alpha_bps: float) -> ShouldOpenDecision:
         if -self.open_trigger_cfg.alpha_bps < alpha_bps < self.open_trigger_cfg.alpha_bps:
-            return False, None
+            return ShouldOpenDecision(should_open_position=False, alpha_direction=None, trigger_name=None)
         if alpha_bps < -self.open_trigger_cfg.alpha_bps:
-            return True, AlphaDirection.BEARISH
+            return ShouldOpenDecision(should_open_position=True,
+                alpha_direction=AlphaDirection.BEARISH, trigger_name=self.open_trigger_cfg.name)
         if alpha_bps > self.open_trigger_cfg.alpha_bps:
-            return True, AlphaDirection.BULLISH
+            return ShouldOpenDecision(should_open_position=True,
+                alpha_direction=AlphaDirection.BULLISH, trigger_name=self.open_trigger_cfg.name)
         raise ValueError('Should never reach here')
 
     def create_close_triggers(self, open_alpha_direction: AlphaDirection, price_at_open_position: float):
@@ -95,7 +108,7 @@ class TriggerContainer:
         ]
         self.price_at_open_position = price_at_open_position
 
-    def should_close_position(self, alpha_bps, price):
+    def decide_should_close_position(self, alpha_bps: float, price: float) -> ShouldCloseDecision:
         if self.close_triggers is None:
             raise ValueError('Close triggers have not been set, so should_close_position should not be called')
         val = [t.name for t in self.close_triggers if t.should_close(alpha_bps, price)]
@@ -105,8 +118,8 @@ class TriggerContainer:
                          f'alpha_bps={alpha_bps}, price_delta_bps={price_delta_bps}, '
                          f'price={price}, price_at_open={self.price_at_open_position}. '
                          f'The following triggers fired: {val}')
-            return True
-        return False
+            return ShouldCloseDecision(should_close_position=True, trigger_name=val[0])
+        return ShouldCloseDecision(should_close_position=False, trigger_name=None)
 
     def clear_close_triggers(self):
         self.close_triggers = None

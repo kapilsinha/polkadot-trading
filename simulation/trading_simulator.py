@@ -426,9 +426,6 @@ class SimDriver:
             # I hate this name exec2_pnl
             token_to_delta_usd_value = self._calc_token_to_delta_usd_value()
             cumulative_exec2_pnl = sum(token_to_delta_usd_value.values())
-            logging.info(f'Total PnL (compared to doing nothing): ${sum(token_to_delta_usd_value.values()):0.2f} '
-                         f'({self.format_token_to_usd(token_to_delta_usd_value)})')
-
             logging.info(f'Block {block_number}, txn {txn_index}: orders = {new_orders}')
             logging.info(f'Block {block_number}, txn {txn_index}: trades =' \
                         f'{ [f"{t} (pnl=${self.pnl_calculator.trade_id_to_exec_pnl[t.trade_id]})" for t in new_trades] }')
