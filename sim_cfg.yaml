@@ -7,11 +7,13 @@ venue:
       - "0x27292cf0016E5dF1d8b37306B2A98588aCbD6fCA" # axlATOM 1608458
       - "0xfA9343C3897324496A05fC75abeD6bAC29f8A40f" # ETH_multi 13271113431432677
     holdings:
-      "0x818ec0A7Fe18Ff94269904fCED6AE3DaE6d6dC0b": 100059900
-      "0xAcc15dC74880C9944775448304B263D191c6077F": 86170833928555164034
-      "0x0E358838ce72d5e61E0018a2ffaC4bEC5F4c88d2": 252737768152886094298
-      "0x27292cf0016E5dF1d8b37306B2A98588aCbD6fCA": 1608458
-      "0xfA9343C3897324496A05fC75abeD6bAC29f8A40f": 13271113431432677
+      "0x818ec0A7Fe18Ff94269904fCED6AE3DaE6d6dC0b": 100059900 # USDC $100
+      "0xAcc15dC74880C9944775448304B263D191c6077F": 86170833928555164034 # wGLMR $50
+      "0x0E358838ce72d5e61E0018a2ffaC4bEC5F4c88d2": 252737768152886094298 # STELLA $30
+      "0x27292cf0016E5dF1d8b37306B2A98588aCbD6fCA": 1608458 # ATOM $25
+      "0xfA9343C3897324496A05fC75abeD6bAC29f8A40f": 13271113431432677 # ETH $23
+      "0xc9BAA8cfdDe8E328787E29b4B078abf2DaDc2055": 100000000000000000 # fake BNB holdings -> $30
+      "0xFfFFfFff1FcaCBd218EDc0EbA20Fc2308C778080": 100000000000 # fake xcDOT holdings -> $75
     data_path:
       liquid_pairs: "data/stellaswap_liquid_pairs.csv"
       pair_metadata: "data/stellaswap_metadata_snapshot.csv"
@@ -47,17 +49,15 @@ strategy:
         "0x818ec0A7Fe18Ff94269904fCED6AE3DaE6d6dC0b": 30000000 # USDC_multi
       risk: 0.9
       max_our_trade_impact_rate_bps: 15
+      acceptable_slippage_bps: 10
       binance_quote_calculation:
-        # numerator:
-        #   type: "stellaswap"
-        #   token_address: "0x818ec0A7Fe18Ff94269904fCED6AE3DaE6d6dC0b"
         numerator:
           type: "constant"
           value: 1
         denominator:
           type: "binance"
           symbol: "ETHUSDT"
-          # price_data_pull_rate_seconds: 3 # only used in prod
+          price_data_pull_rate_seconds: 3 # only used in prod
           # smoothed_price_{t+1} = new_price * factor + smoothed_price * (1 - factor)
           # i.e. factor = 1 no smoothing; 0 means the smoothed price never updates
           price_exp_smooth_factor: 0.1 # 1
@@ -66,20 +66,83 @@ strategy:
         alpha_bps: 100
       # Any alpha_bps in the close triggers must be less than the alpha_bps in the open trigger!
       trigger_close_order: # OR of the following list (any trigger closes the order)
-        # - name: "price_target"
-        #   price_delta_bps: 75
-        # dangerous because stella price can swing in the opposite direction with large trades;
-        # should add an alpha component or smoothen the stella price
-        # - name: "price_stop_loss"
-        #   price_delta_bps: -50
-        # - name: "alpha_reversal"
-        #   alpha_bps: -40
+        - name: "alpha_reversal"
+          alpha_bps: -15
         - name: "combined_price_alpha_decay_target" # AND of the following conditions
-          price_delta_bps: 50
+          price_delta_bps: 60
           alpha_bps: 15
         - name: "combined_price_alpha_growth_target" # AND of the following conditions
-          price_delta_bps: 85
+          price_delta_bps: 95
+          alpha_bps: 35
+        # stella price can swing wildly with large trades so we add an alpha component to the trigger
+        - name: "combined_price_alpha_stop_loss" # AND of the following conditions
+          price_delta_bps: -25
+          alpha_bps: 25
+    usdc_bnb:
+      pair_address: "0xAc2657ba28768FE5F09052f07A9B7ea867A4608f"
+      allow_consecutive_same_side_orders: false
+      allow_opposite_side_order_to_close: true
+      allowance:
+        "0xfA9343C3897324496A05fC75abeD6bAC29f8A40f": 13000000000000000 # ETH_multi
+        "0xc9BAA8cfdDe8E328787E29b4B078abf2DaDc2055": 100000000000000000 # fake BNB holdings
+        "0x818ec0A7Fe18Ff94269904fCED6AE3DaE6d6dC0b": 30000000 # USDC_multi
+      risk: 0.9
+      max_our_trade_impact_rate_bps: 15
+      binance_quote_calculation:
+        numerator:
+          type: "constant"
+          value: 1
+        denominator:
+          type: "binance"
+          symbol: "BNBUSDT"
+          price_data_pull_rate_seconds: 3 # only used in prod
+          price_exp_smooth_factor: 0.1 # 1
+      trigger_open_order:
+        name: "price_movement_predictor"
+        alpha_bps: 100
+      trigger_close_order: # OR of the following list (any trigger closes the order)
+        - name: "alpha_reversal"
+          alpha_bps: -15
+        - name: "combined_price_alpha_decay_target" # AND of the following conditions
+          price_delta_bps: 60
+          alpha_bps: 15
+        - name: "combined_price_alpha_growth_target" # AND of the following conditions
+          price_delta_bps: 95
           alpha_bps: 35
         - name: "combined_price_alpha_stop_loss" # AND of the following conditions
           price_delta_bps: -25
-          alpha_bps: 30
+          alpha_bps: 25
+    wglmr_xcdot:
+      pair_address: "0xa927E1e1E044CA1D9fe1854585003477331fE2Af"
+      allow_consecutive_same_side_orders: false
+      allow_opposite_side_order_to_close: true
+      allowance:
+        "0xAcc15dC74880C9944775448304B263D191c6077F": 86170833928555164034
+        "0xFfFFfFff1FcaCBd218EDc0EbA20Fc2308C778080": 100000000000 # fake xcDOT holdings
+      risk: 0.9
+      max_our_trade_impact_rate_bps: 15
+      binance_quote_calculation:
+        numerator:
+          type: "binance"
+          symbol: "GLMRUSDT"
+          price_exp_smooth_factor: 0.1
+        denominator:
+          type: "binance"
+          symbol: "DOTUSDT"
+          price_data_pull_rate_seconds: 3 # only used in prod
+          price_exp_smooth_factor: 0.1 # 1
+      trigger_open_order:
+        name: "price_movement_predictor"
+        alpha_bps: 125
+      trigger_close_order: # OR of the following list (any trigger closes the order)
+        - name: "alpha_reversal"
+          alpha_bps: -15
+        - name: "combined_price_alpha_decay_target" # AND of the following conditions
+          price_delta_bps: 60
+          alpha_bps: 15
+        - name: "combined_price_alpha_growth_target" # AND of the following conditions
+          price_delta_bps: 65
+          alpha_bps: 35
+        - name: "combined_price_alpha_stop_loss" # AND of the following conditions
+          price_delta_bps: -25
+          alpha_bps: 25

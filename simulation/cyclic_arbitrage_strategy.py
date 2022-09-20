@@ -5,9 +5,16 @@ from smart_order_router.sor import single_sor_no_fees, single_sor_with_fees
 
 from collections import defaultdict
 from glob import glob
+import logging
 from scipy.optimize import minimize_scalar
 from typing import Any, Dict, List, Set, Tuple
 
+
+logging.basicConfig(
+    level=logging.INFO,
+    format= '[%(asctime)s.%(msecs)03d] %(levelname)s:%(name)s %(message)s | %(pathname)s:%(lineno)d',
+    datefmt='%Y%m%d,%H:%M:%S'
+)
 
 class CyclicArbitrageStrategy(Strategy):
 
@@ -22,15 +29,22 @@ class CyclicArbitrageStrategy(Strategy):
         strategy_config = config['strategy']['cyclic_arbitrage']
         self.amount_in_lower_bound_usd = strategy_config['amount_in_lower_bound_usd']
         self.amount_in_upper_bound_usd = strategy_config['amount_in_upper_bound_usd']
+        self.acceptable_slippage_rate = strategy_config['acceptable_slippage_rate']
 
         # We need to expect to make at least 3 cents to justify making the swap
         # Because we just net +tokens of what we put in, we do not incur any added cost
         # if the price of the token goes down
         self.min_expected_profit_usd = strategy_config['min_expected_profit_usd']
 
+        self.pending_order_ids: Set[int] = set()
+
     def on_state_update(self, state_manager: StateManager) -> List[Order]:
+        if len(self.pending_order_ids) > 0:
+            logging.info('Pending an order fill, so we do not generate more orders')
+            return []
         potential_orders, order_id_to_token_pair_path = self._generate_profitable_orders(state_manager)
         portfolio_orders = self._generate_order_portfolio(potential_orders, order_id_to_token_pair_path)
+        self.pending_order_ids = self.pending_order_ids.union(set([order.order_id for order in portfolio_orders]))
         return portfolio_orders
 
     def on_event(self, state_manager: StateManager, event_data: Dict[str, Any]):
@@ -38,7 +52,13 @@ class CyclicArbitrageStrategy(Strategy):
         raise NotImplementedError
 
     def on_filled_orders(self, state_manager: StateManager, new_trades: List[Trade]):
-        pass
+        filled_order_ids = set([trade.order_id for trade in new_trades])
+        self.pending_order_ids -= filled_order_ids
+        # We fill all outstanding orders in sim, so we should have no pending ones anymore
+        assert(len(self.pending_order_ids) == 0)
+
+        failed_trades = [t for t in new_trades if not t.is_success]
+        logging.warning(f'Order(s) was/were rejected, trade(s) = {failed_trades}')
 
     def _generate_profitable_orders(self, state_manager: StateManager) -> Tuple[List[Order], Dict[str, List[str]]]:
         '''
@@ -56,9 +76,11 @@ class CyclicArbitrageStrategy(Strategy):
             expected_pnl_usd = (best_amount_out - best_amount_in) * token.get_usd_value()
 
             if expected_pnl_usd > self.min_expected_profit_usd:
+                amount_out_min = (best_amount_out - best_amount_in) * (1 - self.acceptable_slippage_rate) + best_amount_in
                 new_order = Order(
                     order_id=state_manager.generate_order_id(),
                     amount_in=best_amount_in,
+                    amount_out_min=amount_out_min,
                     path=self._get_token_path(best_token_pair_path, token.token_address),
                     block_num=state_manager.cur_block_num,
                     last_txn_index=state_manager.last_txn_index,

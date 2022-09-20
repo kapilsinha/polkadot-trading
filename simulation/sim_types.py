@@ -13,7 +13,8 @@ class Order:
     Pretend there is no slippage
     '''
     order_id: int
-    amount_in: float
+    amount_in: int
+    amount_out_min: int
     path: List[str] # list of token addresses
 
     # These are not required for the sim logic but provide useful metadata
@@ -27,10 +28,13 @@ class Trade:
     order_id: int
     trade_id: int
     pair_address: str
+    # Important! is_success means the trade was successful, otherwise the order was rejected
+    # (because min_amount_out was not met)
+    is_success: bool
     # delta is the change in the amount of tokens in the liquidity pool
     # delta is positive if it deposits tokens into the liquidity pool, negative if it takes them out
-    amount0_delta: float
-    amount1_delta: float
+    amount0_delta: int
+    amount1_delta: int
 
 
 class Token:

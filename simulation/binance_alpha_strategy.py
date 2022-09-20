@@ -7,7 +7,7 @@ from collections import defaultdict
 from dataclasses import asdict, dataclass
 from glob import glob
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 
 logging.basicConfig(
@@ -75,6 +75,7 @@ class BinanceAlphaTokenPairStrategy(Strategy):
         self.allow_opposite_side_order_to_close = strategy_config['allow_opposite_side_order_to_close']
         self.max_our_trade_impact_rate_bps = strategy_config['max_our_trade_impact_rate_bps']
         self.risk = strategy_config['risk']
+        self.acceptable_slippage_bps = strategy_config['acceptable_slippage_bps']
 
         pair = state_manager.address_to_token_pair[self.pair_address]
         self.token0_pos = TokenPosition(
@@ -101,8 +102,14 @@ class BinanceAlphaTokenPairStrategy(Strategy):
         # This is only needed to map trades to AlphaDirection, to update self.open_position_alpha_direction.
         # It can be cleared thereafter
         self.order_id_to_alpha_direction: Dict[int, AlphaDirection] = {}
+
+        self.pending_order_ids: Set[int] = set()
     
     def on_state_update(self, state_manager: StateManager) -> List[Order]:
+        if len(self.pending_order_ids) > 0:
+            logging.info('Pending an order fill, so we do not generate more orders')
+            return []
+
         simple_alpha = self.compute_binance_alpha(state_manager)
         if simple_alpha is None:
             logging.warning('Binance alpha is null (not yet initialized)...')
@@ -128,7 +135,8 @@ class BinanceAlphaTokenPairStrategy(Strategy):
         elif open_decision.should_open_position:
             alpha = AlphaContainer.create_from_open_decision(simple_alpha, open_decision)
             orders = self._generate_open_order(state_manager, alpha)
-                    
+        
+        self.pending_order_ids = self.pending_order_ids.union(set([order.order_id for order in orders]))
         return orders
 
     def on_event(self, state_manager: StateManager, event_data: Dict[str, Any]):
@@ -145,12 +153,23 @@ class BinanceAlphaTokenPairStrategy(Strategy):
         return self.on_state_update(state_manager)
 
     def on_filled_orders(self, state_manager: StateManager, new_trades: List[Trade]):
-        self.open_position_alpha_direction = self.order_id_to_alpha_direction[new_trades[0].order_id]
-        assert(len(self.order_id_to_alpha_direction) == 1)
-        del self.order_id_to_alpha_direction[new_trades[0].order_id]
+        filled_order_ids = set([trade.order_id for trade in new_trades])
+        self.pending_order_ids -= filled_order_ids
+        # We fill all outstanding orders in sim, so we should have no pending ones anymore
+        assert(len(self.pending_order_ids) == 0)
 
-        assert(len(new_trades) == 1) # since we only allow one outstanding order at a time
+        assert(len(new_trades) == 1) # since we specify a path of length 2 and allow only one outstanding order at a time
         new_trade = new_trades[0]
+
+        assert(len(self.order_id_to_alpha_direction) == 1)
+        order_alpha_direction = self.order_id_to_alpha_direction[new_trade.order_id]
+        del self.order_id_to_alpha_direction[new_trade.order_id]
+
+        if not new_trade.is_success:
+            logging.warning(f'Order was rejected, trade = {new_trade}')
+            return
+        
+        self.open_position_alpha_direction = order_alpha_direction
         if self.open_position_alpha_direction is not None:
             # We opened a position; it's possible it was not explicitly closed before if 
             # the new position is on the opposite side of the original and we have 
@@ -242,31 +261,58 @@ class BinanceAlphaTokenPairStrategy(Strategy):
             int(self.risk * (in_token_pos.allowance + in_token_pos.cumulative_position_delta)),
             int(max_amount_in),
         )
-        new_order = self._create_order(amount_in, path, state_manager, alpha)
+        amount_out_min = token_pair.quote_with_fees(
+            trade_direction, amount_in=amount_in) * (1 - self.acceptable_slippage_bps / 10_000)
+        new_order = self._create_order(amount_in, amount_out_min, path, state_manager, alpha)
         return [new_order]
 
     def _generate_close_order(self, state_manager: StateManager, alpha: AlphaContainer) -> List[Order]:
         token_pair = state_manager.address_to_token_pair[self.pair_address]
-        if self.open_position_alpha_direction == AlphaDirection.BULLISH:
-            # Forward direction trade to close the position
+        # Generally, self.open_position_alpha_direction == AlphaDirection.BULLISH means
+        # that self.token0_pos.open_position_amount > 0; vice versa. But this is NOT
+        # true if we had two consecutive (opposite side) open positions
+        if self.token0_pos.open_position_amount > 0 and self.token1_pos.open_position_amount < 0:
             amount_in = self.token0_pos.open_position_amount
             path = [token_pair.token0_address, token_pair.token1_address]
-        elif self.open_position_alpha_direction == AlphaDirection.BEARISH:
+            assert(amount_in > 0)
+            amount_out_min = token_pair.quote_with_fees(
+                Direction.FORWARD, amount_in=amount_in) * (1 - self.acceptable_slippage_bps / 10_000)
+            new_orders = [self._create_order(amount_in, amount_out_min, path, state_manager, alpha)]
+        elif self.token0_pos.open_position_amount < 0 and self.token1_pos.open_position_amount > 0:
             amount_in = self.token1_pos.open_position_amount
             path = [token_pair.token1_address, token_pair.token0_address]
+            assert(amount_in > 0)
+            amount_out_min = token_pair.quote_with_fees(
+                Direction.REVERSE, amount_in=amount_in) * (1 - self.acceptable_slippage_bps / 10_000)
+            new_orders = [self._create_order(amount_in, amount_out_min, path, state_manager, alpha)]
+        elif self.token0_pos.open_position_amount > 0 and self.token1_pos.open_position_amount > 0 \
+            or self.token0_pos.open_position_amount < 0 and self.token1_pos.open_position_amount < 0:
+            logging.warning(f'Our open position amounts for both tokens are on the same side '
+                            f'({self.token0_pos.open_position_amount}, {self.token1_pos.open_position_amount}) '
+                            f'likely due to consecutive opposite-side open orders! '
+                            f'We force clear our open positions')
+            self.open_position_alpha_direction = None
+            self.trigger_container.clear_close_triggers()
+            self.token0_pos.open_position_amount = 0
+            self.token1_pos.open_position_amount = 0        
+            new_orders = []
         else:
-            raise ValueError('Attempting to close a position but open position is null')
+            raise ValueError('Should not reach here')
         
-        assert(amount_in > 0)
-        new_order = self._create_order(amount_in, path, state_manager, alpha)
-        return [new_order]
+        return new_orders
 
-    def _create_order(self, amount_in: int, path: List[str],
+    def _create_order(self,
+                      amount_in: int,
+                      amount_out_min: int,
+                      path: List[str],
                       state_manager: StateManager,
                       alpha: AlphaContainer) -> Order:
+        token_pair = state_manager.address_to_token_pair[self.pair_address]
+
         order = Order(
             order_id=state_manager.generate_order_id(),
             amount_in=amount_in,
+            amount_out_min=amount_out_min,
             path=path,
             block_num=state_manager.cur_block_num,
             last_txn_index=state_manager.last_txn_index,
@@ -275,6 +321,7 @@ class BinanceAlphaTokenPairStrategy(Strategy):
                 **asdict(alpha),
             },
         )
+
         self.order_id_to_alpha_direction[order.order_id] = alpha.alpha_direction
         return order
 
@@ -314,7 +361,7 @@ if __name__ == '__main__':
     )
 
     files = [
-        f'data/stellaswap_txn_history/all/stellaswap_data_{x}0000_{x}9999.feather' for x in range(175, 185)
+        f'data/stellaswap_txn_history/all/stellaswap_data_{x}0000_{x}9999.feather' for x in range(165, 185)
     ]
     binance_symbol_to_data_feather_files = {
         'ETHUSDT': [f.replace(
@@ -322,5 +369,21 @@ if __name__ == '__main__':
                 'data/binance_history/eth_usdt/processed/binance_data'
             ) for f in files]
     }
+    # binance_symbol_to_data_feather_files = {
+    #     'BNBUSDT': [f.replace(
+    #             'data/stellaswap_txn_history/all/stellaswap_data',
+    #             'data/binance_history/bnb_usdt/processed/binance_data'
+    #         ) for f in files]
+    # }
+    # binance_symbol_to_data_feather_files = {
+    #     'DOTUSDT': [f.replace(
+    #             'data/stellaswap_txn_history/all/stellaswap_data',
+    #             'data/binance_history/dot_usdt/processed/binance_data'
+    #         ) for f in files],
+    #     'GLMRUSDT': [f.replace(
+    #             'data/stellaswap_txn_history/all/stellaswap_data',
+    #             'data/binance_history/glmr_usdt/processed/binance_data'
+    #         ) for f in files],
+    # }
     sim_driver.process_files(files, binance_symbol_to_data_feather_files)
     logging.info(f'Above results are for {config_name}')

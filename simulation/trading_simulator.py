@@ -3,10 +3,12 @@ from smart_order_router.graph import Graph
 from simulation.sim_types import Order, Token, TokenPair, Trade
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 import logging
 import numpy as np
 import pandas as pd
-from typing import Any, DefaultDict, Dict, List, Optional
+from sortedcontainers import SortedList
+from typing import Any, Callable, DefaultDict, Dict, List, Optional
 
 
 logging.basicConfig(
@@ -164,10 +166,9 @@ class FillEngine:
                 s.add(end)
             return True
 
-        assert(are_order_endpoints_disjoint(orders))
-        out_trades = []
-        for o in orders:
+        def is_order_successful(o):
             amount_in = o.amount_in
+            amount_out = 0
             for i in range(len(o.path) - 1):
                 start_token = o.path[i]
                 end_token = o.path[i + 1]
@@ -176,30 +177,66 @@ class FillEngine:
                 token_pair = state_manager.address_to_token_pair[pair_address]
                 if start_token == token_pair.token0_address and end_token == token_pair.token1_address:
                     amount_out = int(token_pair.quote_with_fees(Direction.FORWARD, amount_in))
-                    amount0_delta = amount_in
-                    amount1_delta = -amount_out
                 elif start_token == token_pair.token1_address and end_token == token_pair.token0_address:
                     amount_out = int(token_pair.quote_with_fees(Direction.REVERSE, amount_in))
-                    amount0_delta = -amount_out
-                    amount1_delta = amount_in
                 else:
                     raise ValueError('StateManager.tokens_to_pair was incorrectly initialized')
-                                
+                
+                # Propagate the amount_out token as the amount_in for the next liquidity pool in the path
+                amount_in = amount_out
+            is_success = amount_out >= o.amount_out_min
+            if not is_success:
+                logging.warning(f'Order {o} rejected because amount_out ({amount_out}) is less than {o.amount_out_min}')
+            return is_success
+
+        assert(are_order_endpoints_disjoint(orders))
+        out_trades = []
+        for o in orders:
+            if not is_order_successful(o):
                 new_trade = Trade(
                     order_id=o.order_id,
                     trade_id=self.generate_trade_id(),
-                    pair_address=pair_address,
-                    amount0_delta=amount0_delta,
-                    amount1_delta=amount1_delta,
+                    pair_address='unused',
+                    is_success=False,
+                    amount0_delta=0,
+                    amount1_delta=0,
                 )
-                
-                self._update_our_holdings_after_trades(state_manager, new_trade)
-                if self.should_update_state_reserves_after_trades:
-                    self._update_state_reserves_after_trades(state_manager, new_trade)
-
                 out_trades.append(new_trade)
-                # Propagate the amount_out token as the amount_in for the next liquidity pool in the path
-                amount_in = amount_out
+            else:
+                amount_in = o.amount_in
+                for i in range(len(o.path) - 1):
+                    start_token = o.path[i]
+                    end_token = o.path[i + 1]
+                    
+                    pair_address = state_manager.tokens_to_pair[(start_token, end_token)]
+                    token_pair = state_manager.address_to_token_pair[pair_address]
+                    if start_token == token_pair.token0_address and end_token == token_pair.token1_address:
+                        amount_out = int(token_pair.quote_with_fees(Direction.FORWARD, amount_in))
+                        amount0_delta = amount_in
+                        amount1_delta = -amount_out
+                    elif start_token == token_pair.token1_address and end_token == token_pair.token0_address:
+                        amount_out = int(token_pair.quote_with_fees(Direction.REVERSE, amount_in))
+                        amount0_delta = -amount_out
+                        amount1_delta = amount_in
+                    else:
+                        raise ValueError('StateManager.tokens_to_pair was incorrectly initialized')
+                                    
+                    new_trade = Trade(
+                        order_id=o.order_id,
+                        trade_id=self.generate_trade_id(),
+                        pair_address=pair_address,
+                        is_success=True,
+                        amount0_delta=amount0_delta,
+                        amount1_delta=amount1_delta,
+                    )
+                    
+                    self._update_our_holdings_after_trades(state_manager, new_trade)
+                    if self.should_update_state_reserves_after_trades:
+                        self._update_state_reserves_after_trades(state_manager, new_trade)
+
+                    out_trades.append(new_trade)
+                    # Propagate the amount_out token as the amount_in for the next liquidity pool in the path
+                    amount_in = amount_out
         return out_trades
 
 
@@ -264,6 +301,20 @@ class Strategy(ABC):
     def on_filled_orders(self, state_manager: StateManager, new_trades: List[Trade]):
         pass
 
+# Used in SimDriver to defer some action to the start of trigger_block_number
+# Currently this is used to fill orders 2 blocks after the trigger (since this is
+# what happens in reality; this helps avoid simulation overestimation of PnL by not
+# allowing us to exploit large jumps that we could not exploit in reality)
+@dataclass(frozen=True)
+class DeferredAction:
+    trigger_block_number: int
+    func: Callable
+    args: List[Any]
+    kwargs: List[Dict[str, Any]]
+
+    def __lt__(self, other):
+        return self.trigger_block_number < other.trigger_block_number
+
 
 class SimDriver:
     '''
@@ -296,6 +347,8 @@ class SimDriver:
 
         self.should_trigger_strategy_on_end_of_block = should_trigger_strategy_on_end_of_block
         self.should_trigger_strategy_on_txn = should_trigger_strategy_on_txn
+
+        self.deferred_action_queue: SortedList[DeferredAction] = SortedList()
 
     """
     stellaswap_data_feather_files: List of files containing the blockchain data
@@ -362,6 +415,8 @@ class SimDriver:
             self._dispatch_binance_price_events(
                 binance_dfs, epoch_millis, binance_symbol_to_next_index, block_number, txn_index)
 
+            self._process_deferred_action_queue(block_number)
+
             if not self.state_manager.is_bootstrapped and not is_chunk_full_snapshot(block_number, txn_index):
                 logging.warning(f'Waiting for state manager to bootstrap off a full snapshot; '
                                 f'we are throwing away block {block_number}, txn {txn_index}')
@@ -379,7 +434,7 @@ class SimDriver:
             
             if should_trigger_strategy:
                 new_orders = self.strategy.on_state_update(self.state_manager)
-                self._handle_new_orders(new_orders, block_number, txn_index)
+                self._queue_new_orders(new_orders, block_number, txn_index)
 
         self._dispatch_binance_price_events(
             binance_dfs, float('inf'), binance_symbol_to_next_index, block_number, txn_index)
@@ -394,7 +449,7 @@ class SimDriver:
         ):
         for event in self._get_binance_price_events(binance_dfs, timestamp_millis_hi, binance_symbol_to_next_index):
             new_orders = self.strategy.on_event(self.state_manager, event)
-            self._handle_new_orders(new_orders, block_number, txn_index)
+            self._queue_new_orders(new_orders, block_number, txn_index)
     
     def _get_binance_price_events(
             self,
@@ -416,28 +471,40 @@ class SimDriver:
                 binance_symbol_to_next_index[binance_symbol] += 1
         # Sorting should not matter but we sort across the binance symbols for good measure
         return sorted(events, key=lambda x: x['timestamp'])
+
+    def _queue_new_orders(self, new_orders: List[Order], block_number: int, txn_index: int):
+        if len(new_orders) > 0:
+            self.deferred_action_queue.add(DeferredAction(
+                # in live, at best we execute in the middle of block x + 2.
+                # So here we execute at the start of block x + 3
+                trigger_block_number=block_number + 3,
+                func=self._handle_new_orders,
+                args=[new_orders, block_number, txn_index],
+                kwargs={},
+            ))
     
     def _handle_new_orders(self, new_orders: List[Order], block_number: int, txn_index: int):
-        if len(new_orders) > 0:           
-            new_trades = self.fill_engine.fill_orders(self.state_manager, new_orders)
-            self.strategy.on_filled_orders(self.state_manager, new_trades)
+        assert(len(new_orders) > 0) # this is already filtered in queue_new_orders
+        new_trades = self.fill_engine.fill_orders(self.state_manager, new_orders)
+        self.strategy.on_filled_orders(self.state_manager, new_trades)
+        successful_trades = [t for t in new_trades if t.is_success == True]
 
-            self.pnl_calculator.calc_pnl(self.state_manager, new_trades)
+        self.pnl_calculator.calc_pnl(self.state_manager, successful_trades)
 
-            # TODO: This belongs in PnlCalculator but I don't know what to call this metric. Find a name and move
-            # I hate this name exec2_pnl
-            token_to_delta_usd_value = self._calc_token_to_delta_usd_value()
-            cumulative_exec2_pnl = sum(token_to_delta_usd_value.values())
-            logging.info(f'Block {block_number}, txn {txn_index}: orders = {new_orders}')
-            logging.info(f'Block {block_number}, txn {txn_index}: trades =' \
-                        f'{ [f"{t} (pnl=${self.pnl_calculator.trade_id_to_exec_pnl[t.trade_id]})" for t in new_trades] }')
-            logging.info(f'Block {block_number}, holdings = {self.state_manager.get_readable_holdings()}')
-            logging.info(f'Block {block_number}, txn {txn_index}: '
-                        # f'total_pnl_delta_since_last_trades=${(self.pnl_calculator.total_pnl - self.pnl_calculator.prev_total_pnl):0.2f}, '
-                        # f'cumulative_exec_pnl=${self.pnl_calculator.total_exec_pnl:0.2f}, '
-                        # f'cumulative_total_pnl=${self.pnl_calculator.total_pnl:0.2f}, '
-                        f'cumulative_exec2_pnl=${cumulative_exec2_pnl:0.2f}, '
-                        f'({self.format_token_to_usd(token_to_delta_usd_value)})\n')
+        # TODO: This belongs in PnlCalculator but I don't know what to call this metric. Find a name and move
+        # I hate this name exec2_pnl
+        token_to_delta_usd_value = self._calc_token_to_delta_usd_value()
+        cumulative_exec2_pnl = sum(token_to_delta_usd_value.values())
+        logging.info(f'Trigger block {block_number}, txn {txn_index}: orders = {new_orders}')
+        logging.info(f'Trigger block {block_number}, txn {txn_index}: trades =' \
+                    f'{ [f"{t} (pnl=${self.pnl_calculator.trade_id_to_exec_pnl[t.trade_id]})" for t in successful_trades] }')
+        logging.info(f'Trigger block {block_number}, holdings = {self.state_manager.get_readable_holdings()}')
+        logging.info(f'Trigger block {block_number}, txn {txn_index}: '
+                    # f'total_pnl_delta_since_last_trades=${(self.pnl_calculator.total_pnl - self.pnl_calculator.prev_total_pnl):0.2f}, '
+                    # f'cumulative_exec_pnl=${self.pnl_calculator.total_exec_pnl:0.2f}, '
+                    # f'cumulative_total_pnl=${self.pnl_calculator.total_pnl:0.2f}, '
+                    f'cumulative_exec2_pnl=${cumulative_exec2_pnl:0.2f}, '
+                    f'({self.format_token_to_usd(token_to_delta_usd_value)})\n')
 
     def _calc_token_to_delta_usd_value(self):
         token_to_delta_usd_value = {}
@@ -448,6 +515,12 @@ class SimDriver:
             if delta_token_usd != 0:
                 token_to_delta_usd_value[token] = delta_token_usd
         return token_to_delta_usd_value
+    
+    def _process_deferred_action_queue(self, cur_block_number):
+        while len(self.deferred_action_queue) > 0 \
+                and self.deferred_action_queue[0].trigger_block_number <= cur_block_number:
+            action = self.deferred_action_queue.pop(0)
+            action.func(*action.args, **action.kwargs)
 
     @staticmethod
     def format_token_to_usd(token_to_usd):
