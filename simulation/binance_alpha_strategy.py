@@ -338,7 +338,7 @@ if __name__ == '__main__':
     config_name = sys.argv[1]
     logging.info(f'Below results are for {config_name}')
 
-    config = load_config(filename='sim_cfg.yaml')
+    config = load_config(filename='sim_cfg_expanded.yaml')
     strategy_config = config['strategy']['binance_alpha'][config_name]
 
     token_holdings = defaultdict(int)
@@ -363,27 +363,27 @@ if __name__ == '__main__':
     files = [
         f'data/stellaswap_txn_history/all/stellaswap_data_{x}0000_{x}9999.feather' for x in range(165, 185)
     ]
-    binance_symbol_to_data_feather_files = {
-        'ETHUSDT': [f.replace(
-                'data/stellaswap_txn_history/all/stellaswap_data',
-                'data/binance_history/eth_usdt/processed/binance_data'
-            ) for f in files]
-    }
+    # binance_symbol_to_data_feather_files = {
+    #     'ETHUSDT': [f.replace(
+    #             'data/stellaswap_txn_history/all/stellaswap_data',
+    #             'data/binance_history/eth_usdt/processed/binance_data'
+    #         ) for f in files]
+    # }
     # binance_symbol_to_data_feather_files = {
     #     'BNBUSDT': [f.replace(
     #             'data/stellaswap_txn_history/all/stellaswap_data',
     #             'data/binance_history/bnb_usdt/processed/binance_data'
     #         ) for f in files]
     # }
-    # binance_symbol_to_data_feather_files = {
-    #     'DOTUSDT': [f.replace(
-    #             'data/stellaswap_txn_history/all/stellaswap_data',
-    #             'data/binance_history/dot_usdt/processed/binance_data'
-    #         ) for f in files],
-    #     'GLMRUSDT': [f.replace(
-    #             'data/stellaswap_txn_history/all/stellaswap_data',
-    #             'data/binance_history/glmr_usdt/processed/binance_data'
-    #         ) for f in files],
-    # }
+    binance_symbol_to_data_feather_files = {
+        'DOTUSDT': [f.replace(
+                'data/stellaswap_txn_history/all/stellaswap_data',
+                'data/binance_history/dot_usdt/processed/binance_data'
+            ) for f in files],
+        'GLMRUSDT': [f.replace(
+                'data/stellaswap_txn_history/all/stellaswap_data',
+                'data/binance_history/glmr_usdt/processed/binance_data'
+            ) for f in files],
+    }
     sim_driver.process_files(files, binance_symbol_to_data_feather_files)
     logging.info(f'Above results are for {config_name}')

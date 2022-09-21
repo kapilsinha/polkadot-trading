@@ -1,0 +1,18 @@
+venue: test
+order_sender:
+  should_send_orders: false # sends orders (live trading) if true!
+strategy:
+  binance_alpha:
+    wglmr_xcdot:
+      pair_address: "0xa927E1e1E044CA1D9fe1854585003477331fE2Af"
+      allow_consecutive_same_side_orders: True | False
+      risk: 0.9 #| 10
+      trigger_open_order:
+        name: "price_movement_predictor"
+        alpha_bps: 125
+      trigger_close_order: # OR of the following list (any trigger closes the order)
+        - name: "alpha_reversal"
+          alpha_bps: -15
+        - name: "combined_price_alpha_decay_target" # AND of the following conditions
+          price_delta_bps: 60 | 6000 | remove
+          alpha_bps: 15

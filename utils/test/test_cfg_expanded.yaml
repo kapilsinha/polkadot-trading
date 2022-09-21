@@ -1,0 +1,77 @@
+order_sender:
+  should_send_orders: false
+strategy:
+  binance_alpha:
+    wglmr_xcdot1:
+      allow_consecutive_same_side_orders: true
+      pair_address: '0xa927E1e1E044CA1D9fe1854585003477331fE2Af'
+      risk: 0.9
+      trigger_close_order:
+      - alpha_bps: -15
+        name: alpha_reversal
+      - alpha_bps: 15
+        name: combined_price_alpha_decay_target
+        price_delta_bps: 60
+      trigger_open_order:
+        alpha_bps: 125
+        name: price_movement_predictor
+    wglmr_xcdot2:
+      allow_consecutive_same_side_orders: true
+      pair_address: '0xa927E1e1E044CA1D9fe1854585003477331fE2Af'
+      risk: 0.9
+      trigger_close_order:
+      - alpha_bps: -15
+        name: alpha_reversal
+      - alpha_bps: 15
+        name: combined_price_alpha_decay_target
+        price_delta_bps: 6000
+      trigger_open_order:
+        alpha_bps: 125
+        name: price_movement_predictor
+    wglmr_xcdot3:
+      allow_consecutive_same_side_orders: true
+      pair_address: '0xa927E1e1E044CA1D9fe1854585003477331fE2Af'
+      risk: 0.9
+      trigger_close_order:
+      - alpha_bps: -15
+        name: alpha_reversal
+      trigger_open_order:
+        alpha_bps: 125
+        name: price_movement_predictor
+    wglmr_xcdot4:
+      allow_consecutive_same_side_orders: false
+      pair_address: '0xa927E1e1E044CA1D9fe1854585003477331fE2Af'
+      risk: 0.9
+      trigger_close_order:
+      - alpha_bps: -15
+        name: alpha_reversal
+      - alpha_bps: 15
+        name: combined_price_alpha_decay_target
+        price_delta_bps: 60
+      trigger_open_order:
+        alpha_bps: 125
+        name: price_movement_predictor
+    wglmr_xcdot5:
+      allow_consecutive_same_side_orders: false
+      pair_address: '0xa927E1e1E044CA1D9fe1854585003477331fE2Af'
+      risk: 0.9
+      trigger_close_order:
+      - alpha_bps: -15
+        name: alpha_reversal
+      - alpha_bps: 15
+        name: combined_price_alpha_decay_target
+        price_delta_bps: 6000
+      trigger_open_order:
+        alpha_bps: 125
+        name: price_movement_predictor
+    wglmr_xcdot6:
+      allow_consecutive_same_side_orders: false
+      pair_address: '0xa927E1e1E044CA1D9fe1854585003477331fE2Af'
+      risk: 0.9
+      trigger_close_order:
+      - alpha_bps: -15
+        name: alpha_reversal
+      trigger_open_order:
+        alpha_bps: 125
+        name: price_movement_predictor
+venue: test
