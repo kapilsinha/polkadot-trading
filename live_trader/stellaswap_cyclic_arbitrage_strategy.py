@@ -1,4 +1,5 @@
 from live_trader.order import Order
+from live_trader.trade import Trade
 from stellaswap.stellaswap_token import StellaswapTokenContainer, StellaswapTokenPairContainer
 from smart_order_router.graph import Graph
 from smart_order_router.sor import single_sor_no_fees, single_sor_with_fees
@@ -45,6 +46,8 @@ class StellaswapCyclicArbitrageStrategy:
 
         self.order_timeout_seconds = strategy_config['order_timeout_seconds']
 
+        self.pending_order_ids: Set[int] = set()
+
     @classmethod
     def generate_order_id(cls):
         order_id = cls._order_id
@@ -52,9 +55,18 @@ class StellaswapCyclicArbitrageStrategy:
         return order_id
 
     def on_state_update(self, token_graph: Graph, timestamp: int) -> List[Order]:
+        if len(self.pending_order_ids) > 0:
+            logging.warning(f'Not generating orders because we are pending receipt for our orders: {self.pending_order_ids}')
+            return []
         potential_orders, order_id_to_token_pair_path = self._generate_profitable_orders(token_graph, timestamp)
         portfolio_orders = self._generate_order_portfolio(potential_orders, order_id_to_token_pair_path)
+        self.pending_order_ids = set([o.order_id for o in portfolio_orders])
         return portfolio_orders
+
+    def on_our_trades(self, trades: List[Trade]):
+        logging.info(f'Received trades: {trades}')
+        for t in trades:
+            self.pending_order_ids.remove(t.order_id)
 
     def _generate_profitable_orders(self, token_graph: Graph, timestamp: int) -> Tuple[List[Order], Dict[str, List[str]]]:
         '''

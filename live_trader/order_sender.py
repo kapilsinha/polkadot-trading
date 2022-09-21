@@ -1,4 +1,5 @@
 from live_trader.order import Order
+from live_trader.trade import Trade
 
 import logging
 import os
@@ -26,6 +27,8 @@ class OrderSender:
         self.private_key = os.environ.get('PRIVATE_KEY')
         self._validate_wallet()
 
+        self.pending_txn_to_order_id: Dict[str, int] = {}
+
     def _validate_wallet(self):
         from eth_account import Account
         from eth_account.signers.local import LocalAccount
@@ -38,29 +41,39 @@ class OrderSender:
         self.web3.middleware_onion.add(construct_sign_and_send_raw_middleware(account))
         assert(self.wallet_address == account.address)
 
-    def send_orders_blocking(self, orders: List[Order]):
+    def pop_order_id_for_txn(self, txn_hash: str) -> int:
+        order_id = self.pending_txn_to_order_id[txn_hash]
+        del self.pending_txn_to_order_id[txn_hash]
+        return order_id
+
+    def send_orders_nonblocking(self, orders: List[Order]) -> List[str]:
         if not self.should_send_orders:
             logging.warning('NOT sending out orders because should_send_orders is False')
-            return
+            return []
         glmr_balance = self.web3.eth.get_balance(self.wallet_address) * 1e-18
         if glmr_balance < self.min_glmr_balance:
             logging.warning(f'NOT sending out orders because GLMR balance ({glmr_balance}) is below '
                             f'threshold of {self.min_glmr_balance}. Add more GLMR to your wallet!')
-            return
+            return []
         txn_hashes = [self._send_order(order) for order in orders]
-        # We block on the transaction receipts being mined so that we do not have multiple
-        # waves of pending transactions. This obviously will be a multi-second delay but
-        # this should be acceptable as we wait for the next block of txns anyway
-        # in our trading loop. If/when we move to parsing pending txns, this may require some
-        # TODO: revisiting
-        logging.warning(f'Sending out orders: {txn_hashes}...')
+        logging.warning(f'Sending out orders (waiting for txns to be mined): {txn_hashes}...')
+        return txn_hashes
+
+    def send_orders_blocking(self, orders: List[Order]) -> List[Trade]:
+        txn_hashes = self.send_orders_nonblocking(orders)
+        trades = []
         for txn_hash in txn_hashes:
             try:
-                self.web3.eth.wait_for_transaction_receipt(txn_hash, timeout=300)
+                receipt = self.web3.eth.wait_for_transaction_receipt(txn_hash, timeout=300)
+                is_success = receipt.status == 1
+                order_id = self.pop_order_id_for_txn(txn_hash)
+                trades.append(Trade(order_id=order_id, txn_hash=txn_hash, is_success=is_success))
             except web3.exceptions.TimeExhausted as e:
                 logging.error(f'Timed out waiting for txn receipt: {e}. '
                               f'The txn will likely be included in a later block and rejected, so we move on.')
-        logging.warning(f'Finished sending orders: {txn_hashes}')
+        if len(trades) > 0:
+            logging.warning(f'Finished executing orders: {trades}')
+        return trades
 
     def _send_order(self, order: Order):
         nonce = self.web3.eth.get_transaction_count(self.wallet_address)
@@ -80,7 +93,9 @@ class OrderSender:
         })
         txn = self._update_txn_gas_fees(txn, order)
         signed_txn = self.web3.eth.account.sign_transaction(txn, private_key=self.private_key)
-        return self.web3.eth.send_raw_transaction(signed_txn.rawTransaction)
+        txn_hash = self.web3.eth.send_raw_transaction(signed_txn.rawTransaction).hex()
+        self.pending_txn_to_order_id[txn_hash] = order.order_id
+        return txn_hash
 
     def _update_txn_gas_fees(self, txn: Dict[str, Any], order: Order):
         """
