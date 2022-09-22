@@ -137,7 +137,7 @@ class LiveTrader:
             # The transaction must have succeeded for it to have generated logs
             self.state_manager.remove_pending_txn(txn_hash)
             order_id = self.order_sender.pop_order_id_for_txn(txn_hash)
-            trade = Trade(order_id=order_id, txn_hash=txn_hash, is_success=False, amount0_delta=amount0_delta, amount1_delta=amount1_delta)
+            trade = Trade(order_id=order_id, txn_hash=txn_hash, is_success=True, amount0_delta=amount0_delta, amount1_delta=amount1_delta)
             self.state_manager.add_new_trade(trade)
             logging.info(f'Received token pair swap event for our order: block {event.blockNumber}, pair {event.address}')
 
