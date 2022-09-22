@@ -17,7 +17,7 @@ rpc_endpoint:
     blast-private: "wss://moonbeam.blastapi.io/8bc0b9b2-3ca5-4a46-8e45-bae79244991a"
 venue:
   stellaswap:
-    token_trading_universe: 
+    token_trading_universe:
       - "0x818ec0A7Fe18Ff94269904fCED6AE3DaE6d6dC0b" # USDC multi 100059900
       - "0xAcc15dC74880C9944775448304B263D191c6077F" # wGLMR 86170833928555164034
       - "0x0E358838ce72d5e61E0018a2ffaC4bEC5F4c88d2" # STELLA 252737768152886094298
@@ -37,6 +37,7 @@ venue:
 order_sender:
   wallet_address: "0x05a81d8564a3eA298660e34e03E5Eff9a29d7a2A"
   should_send_orders: false # sends orders (live trading) if true!
+  simple_simulate_fills: true # can only be true if should_send_orders == false
   max_txn_fee_proportion_of_pnl: 0.5
   max_fee_per_gas_gwei: 2000
   min_glmr_balance: 2
@@ -47,3 +48,39 @@ strategy:
     min_expected_profit_usd: 0.03
     acceptable_slippage_rate: 0.5
     order_timeout_seconds: 45
+  binance_alpha:
+    wglmr_xcdot:
+      acceptable_slippage_bps: 10
+      allow_consecutive_same_side_orders: false
+      allow_opposite_side_order_to_close: false
+      allowance:
+        '0xAcc15dC74880C9944775448304B263D191c6077F': 80000000000000000000
+        '0xFfFFfFff1FcaCBd218EDc0EbA20Fc2308C778080': 80000000000
+      binance_quote_calculation:
+        denominator:
+          price_data_pull_rate_seconds: 2.75
+          price_exp_smooth_factor: 0.5
+          symbol: DOTUSDT
+          type: binance
+        numerator:
+          price_data_pull_rate_seconds: 2.75
+          price_exp_smooth_factor: 0.5
+          symbol: GLMRUSDT
+          type: binance
+      max_our_trade_impact_rate_bps: 15
+      order_timeout_seconds: 60
+      pair_address: '0xa927E1e1E044CA1D9fe1854585003477331fE2Af'
+      risk: 0.9
+      trigger_close_order:
+      - alpha_bps: 0
+        name: combined_price_alpha_growth_target
+        price_delta_bps: 96
+      - alpha_bps: 6
+        name: combined_price_alpha_decay_target
+        price_delta_bps: 70
+      - alpha_bps: 0
+        name: combined_price_alpha_stop_loss
+        price_delta_bps: -37
+      trigger_open_order:
+        alpha_bps: 80
+        name: price_movement_predictor

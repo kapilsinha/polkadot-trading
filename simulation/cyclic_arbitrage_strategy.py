@@ -3,8 +3,6 @@ from simulation.sim_types import Token, TokenPair
 from smart_order_router.graph import Graph
 from smart_order_router.sor import single_sor_no_fees, single_sor_with_fees
 
-from collections import defaultdict
-from glob import glob
 import logging
 from scipy.optimize import minimize_scalar
 from typing import Any, Dict, List, Set, Tuple
@@ -18,42 +16,45 @@ logging.basicConfig(
 
 class CyclicArbitrageStrategy(Strategy):
 
-    def __init__(self, config):
-        super().__init__()
-        self.token_trading_universe = config['venue']['stellaswap']['token_trading_universe']
-
+    def __init__(self, strategy_config, token_trading_universe_addrs: List[str]):
+        self.token_trading_universe_addrs = token_trading_universe_addrs
         # Never put in less than 1 cent or more than $10,000 in a single swap
         # Gas fees are generally 1 cent, so it makes no sense to go below that
         # This seems quite high (and it is), but in theory with limit prices, our loss
         # is capped at gas fees of a failed transaction
-        strategy_config = config['strategy']['cyclic_arbitrage']
         self.amount_in_lower_bound_usd = strategy_config['amount_in_lower_bound_usd']
         self.amount_in_upper_bound_usd = strategy_config['amount_in_upper_bound_usd']
-        self.acceptable_slippage_rate = strategy_config['acceptable_slippage_rate']
 
         # We need to expect to make at least 3 cents to justify making the swap
         # Because we just net +tokens of what we put in, we do not incur any added cost
         # if the price of the token goes down
         self.min_expected_profit_usd = strategy_config['min_expected_profit_usd']
 
+        # Do not execute if amount_out < ((expected_amount_out - amount_in) * (1 - slippage_rate)) + amount_in
+        self.acceptable_slippage_rate = strategy_config['acceptable_slippage_rate']
+
         self.pending_order_ids: Set[int] = set()
 
     def on_state_update(self, state_manager: StateManager) -> List[Order]:
         if len(self.pending_order_ids) > 0:
-            logging.info('Pending an order fill, so we do not generate more orders')
+            logging.warning(f'Not generating orders because we are pending receipt for our orders: {self.pending_order_ids}')
             return []
         potential_orders, order_id_to_token_pair_path = self._generate_profitable_orders(state_manager)
         portfolio_orders = self._generate_order_portfolio(potential_orders, order_id_to_token_pair_path)
         self.pending_order_ids = self.pending_order_ids.union(set([order.order_id for order in portfolio_orders]))
         return portfolio_orders
 
-    def on_event(self, state_manager: StateManager, event_data: Dict[str, Any]):
-        # Later we can perhaps define events (like a 3rd party swap txn) and call this callback with that as an argument
-        raise NotImplementedError
+    def on_event(self, state_manager: StateManager, event_data: Dict[str, Any]) -> List[Order]:
+        '''
+        This strategy should never receive events
+        '''
+        raise NotImplementedError()
 
-    def on_filled_orders(self, state_manager: StateManager, new_trades: List[Trade]):
-        filled_order_ids = set([trade.order_id for trade in new_trades])
-        self.pending_order_ids -= filled_order_ids
+    def on_our_trades(self, state_manager: StateManager, new_trades: List[Trade]):
+        logging.info(f'Received trades: {new_trades}')
+        for t in new_trades:
+            self.pending_order_ids.remove(t.order_id)
+        
         # We fill all outstanding orders in sim, so we should have no pending ones anymore
         assert(len(self.pending_order_ids) == 0)
 
@@ -69,14 +70,14 @@ class CyclicArbitrageStrategy(Strategy):
         potential_orders: List[Order] = []
         order_id_to_token_pair_path: Dict[str, List[str]] = {}
 
-        for token_address in self.token_trading_universe:
+        for token_address in self.token_trading_universe_addrs:
             token = state_manager.address_to_token[token_address]
 
             best_amount_in, best_amount_out, best_token_pair_path = self._scipy_find_optimal_amount_in(state_manager.token_graph, token)
             expected_pnl_usd = (best_amount_out - best_amount_in) * token.get_usd_value()
 
             if expected_pnl_usd > self.min_expected_profit_usd:
-                amount_out_min = (best_amount_out - best_amount_in) * (1 - self.acceptable_slippage_rate) + best_amount_in
+                amount_out_min = int((best_amount_out - best_amount_in) * (1 - self.acceptable_slippage_rate) + best_amount_in)
                 new_order = Order(
                     order_id=state_manager.generate_order_id(),
                     amount_in=best_amount_in,
@@ -147,7 +148,7 @@ class CyclicArbitrageStrategy(Strategy):
         # Find the optimum within 0.1 cents 
         tol_tokens = 0.001 / token.get_usd_value()
         res = minimize_scalar(objective_func, bounds=(lower_bound_tokens, upper_bound_tokens), method='bounded', options={'xatol': tol_tokens, 'disp': 0})
-        best_amount_in = res.x
+        best_amount_in = int(res.x)
         best_amount_out, best_token_pair_path = single_sor_with_fees(graph, token.token_address, token.token_address, amount_in=best_amount_in)
         return best_amount_in, best_amount_out, best_token_pair_path
 
@@ -166,6 +167,7 @@ class CyclicArbitrageStrategy(Strategy):
 if __name__ == '__main__':
     from common.helpers import load_config
     from simulation.trading_simulator import StateManager, FillEngine, PnlCalculator, SimDriver
+    from collections import defaultdict
 
     config = load_config(filename='sim_cfg.yaml')
 
@@ -176,7 +178,11 @@ if __name__ == '__main__':
     state_manager = StateManager(config, token_holdings)
     fill_engine = FillEngine(should_update_state_reserves_after_trades=True)
     pnl_calculator = PnlCalculator()
-    cycle_strategy = CyclicArbitrageStrategy(config)
+    cycle_strategy = CyclicArbitrageStrategy(
+        config['strategy']['cyclic_arbitrage'],
+        config['venue']['stellaswap']['token_trading_universe']
+    )
+    
     sim_driver = SimDriver(
         state_manager=state_manager,
         fill_engine=fill_engine,

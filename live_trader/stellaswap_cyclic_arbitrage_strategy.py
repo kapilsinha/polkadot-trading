@@ -1,4 +1,6 @@
 from live_trader.order import Order
+from live_trader.state_manager import StateManager
+from live_trader.strategy import Strategy
 from live_trader.trade import Trade
 from stellaswap.stellaswap_token import StellaswapTokenContainer, StellaswapTokenPairContainer
 from smart_order_router.graph import Graph
@@ -6,7 +8,8 @@ from smart_order_router.sor import single_sor_no_fees, single_sor_with_fees
 
 import logging
 from scipy.optimize import minimize_scalar
-from typing import Dict, List, Set, Tuple
+from typing import Any, Dict, List, Set, Tuple
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -14,15 +17,12 @@ logging.basicConfig(
     datefmt='%Y%m%d,%H:%M:%S'
 )
 
-
 """
 This is a copy of this file in the simulation folder. Longer term we should consolidate them
 into one file (which requires defining common interfaces, etc.). It's actually a decent bit
 of work, so I've punted that for another day. Copy-paste is bad 
 """
-class StellaswapCyclicArbitrageStrategy:
-
-    _order_id = 1
+class StellaswapCyclicArbitrageStrategy(Strategy):
 
     def __init__(self, strategy_config, wallet_address, token_trading_universe: List[StellaswapTokenContainer]):
         self.wallet_address = wallet_address
@@ -48,27 +48,30 @@ class StellaswapCyclicArbitrageStrategy:
 
         self.pending_order_ids: Set[int] = set()
 
-    @classmethod
-    def generate_order_id(cls):
-        order_id = cls._order_id
-        cls._order_id += 1
-        return order_id
-
-    def on_state_update(self, token_graph: Graph, timestamp: int) -> List[Order]:
+    def on_state_update(self, state_manager: StateManager) -> List[Order]:
         if len(self.pending_order_ids) > 0:
             logging.warning(f'Not generating orders because we are pending receipt for our orders: {self.pending_order_ids}')
             return []
-        potential_orders, order_id_to_token_pair_path = self._generate_profitable_orders(token_graph, timestamp)
+        potential_orders, order_id_to_token_pair_path = self._generate_profitable_orders(state_manager)
         portfolio_orders = self._generate_order_portfolio(potential_orders, order_id_to_token_pair_path)
-        self.pending_order_ids = set([o.order_id for o in portfolio_orders])
+        self.pending_order_ids = self.pending_order_ids.union(set([order.order_id for order in portfolio_orders]))
         return portfolio_orders
 
-    def on_our_trades(self, trades: List[Trade]):
-        logging.info(f'Received trades: {trades}')
-        for t in trades:
+    def on_event(self, state_manager: StateManager, event_data: Dict[str, Any]) -> List[Order]:
+        '''
+        This strategy should never receive events
+        '''
+        raise NotImplementedError()
+
+    def on_our_trades(self, state_manager: StateManager, new_trades: List[Trade]):
+        logging.info(f'Received trades: {new_trades}')
+        for t in new_trades:
             self.pending_order_ids.remove(t.order_id)
 
-    def _generate_profitable_orders(self, token_graph: Graph, timestamp: int) -> Tuple[List[Order], Dict[str, List[str]]]:
+        failed_trades = [t for t in new_trades if not t.is_success]
+        logging.warning(f'Order(s) was/were rejected, trade(s) = {failed_trades}')
+
+    def _generate_profitable_orders(self, state_manager: StateManager) -> Tuple[List[Order], Dict[str, List[str]]]:
         '''
         Returns list of profitable orders, order ID -> token pair path
         Note that each order is individually profitable, but there is NO guarantee that any two orders together
@@ -78,23 +81,23 @@ class StellaswapCyclicArbitrageStrategy:
         order_id_to_token_pair_path: Dict[str, List[str]] = {}
 
         for token in self.token_trading_universe:
-            best_amount_in, best_amount_out, best_token_pair_path = self._scipy_find_optimal_amount_in(token_graph, token)
+            best_amount_in, best_amount_out, best_token_pair_path = self._scipy_find_optimal_amount_in(state_manager.token_graph, token)
             expected_pnl_usd = (best_amount_out - best_amount_in) * token.get_usd_value()
 
             if expected_pnl_usd > self.min_expected_profit_usd:
-                amount_out_min = (best_amount_out - best_amount_in) * (1 - self.acceptable_slippage_rate) + best_amount_in
+                amount_out_min = int((best_amount_out - best_amount_in) * (1 - self.acceptable_slippage_rate) + best_amount_in)
                 new_order = Order(
+                    order_id=state_manager.generate_order_id(),
                     amount_in=best_amount_in,
-                    amount_out_min=int(amount_out_min),
+                    amount_out_min=amount_out_min,
                     path=self._get_token_path(best_token_pair_path, token.token_address),
                     to=self.wallet_address,
-                    deadline=timestamp + self.order_timeout_seconds,
-                    order_id=self.generate_order_id(),
+                    deadline=state_manager.last_timestamp + self.order_timeout_seconds,
                     metadata={
                         'input_usd_notional': best_amount_in * token.get_usd_value(),
                         'expected_out_amount': (best_amount_out - best_amount_in),
                         'expected_pnl': expected_pnl_usd,
-                    }
+                    },
                 )
                 potential_orders.append(new_order)
                 order_id_to_token_pair_path[new_order.order_id] = best_token_pair_path

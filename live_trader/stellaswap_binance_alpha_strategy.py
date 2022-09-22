@@ -1,7 +1,10 @@
 from common.enums import AlphaDirection, Direction
 from common.trigger import ShouldCloseDecision, ShouldOpenDecision, TriggerContainer
-from simulation.trading_simulator import Order, StateManager, Strategy, Trade
-from simulation.sim_types import Token, TokenPair
+from live_trader.order import Order
+from live_trader.state_manager import StateManager
+from live_trader.strategy import Strategy
+from live_trader.trade import Trade
+from stellaswap.stellaswap_token import StellaswapTokenContainer, StellaswapTokenPairContainer
 
 from collections import defaultdict
 from dataclasses import asdict, dataclass
@@ -15,6 +18,12 @@ logging.basicConfig(
     format= '[%(asctime)s.%(msecs)03d] %(levelname)s:%(name)s %(message)s | %(pathname)s:%(lineno)d',
     datefmt='%Y%m%d,%H:%M:%S'
 )
+
+"""
+This is a copy of this file in the simulation folder. Longer term we should consolidate them
+into one file (which requires defining common interfaces, etc.). It's actually a decent bit
+of work, so I've punted that for another day. Copy-paste is bad 
+"""
 
 """
 By convention, we consider closing a position as selling back the amount we bought e.g.
@@ -62,20 +71,27 @@ class AlphaContainer(SimpleAlphaContainer):
             alpha_direction=None,
         )
 
-class BinanceAlphaTokenPairStrategy(Strategy):
+class StellaswapBinanceAlphaTokenPairStrategy(Strategy):
 
-    def __init__(self, strategy_config, state_manager: StateManager):
+    def __init__(
+            self,
+            strategy_config,
+            state_manager: StateManager,
+            wallet_address: str,
+        ):
+        self.wallet_address = wallet_address
         self.pair_address = strategy_config['pair_address']
 
         # I don't think we ever will allow consecutive same side orders, so we don't support its logic anywhere
         assert(not strategy_config['allow_consecutive_same_side_orders'])
 
         self.allow_opposite_side_order_to_close = strategy_config['allow_opposite_side_order_to_close']
-        self.max_our_trade_impact_rate_bps = strategy_config['max_our_trade_impact_rate_bps']
-        self.risk = strategy_config['risk']
         self.acceptable_slippage_bps = strategy_config['acceptable_slippage_bps']
+        self.max_our_trade_impact_rate_bps = strategy_config['max_our_trade_impact_rate_bps']
+        self.order_timeout_seconds = strategy_config['order_timeout_seconds']
+        self.risk = strategy_config['risk']
 
-        pair = state_manager.address_to_token_pair[self.pair_address]
+        pair: StellaswapTokenPairContainer = state_manager.address_to_token_pair[self.pair_address]
         self.token0_pos = TokenPosition(
             token_address=pair.token0_address,
             allowance=strategy_config['allowance'][pair.token0_address]
@@ -85,8 +101,9 @@ class BinanceAlphaTokenPairStrategy(Strategy):
             allowance=strategy_config['allowance'][pair.token1_address]
         )
         for addr in [pair.token0_address, pair.token1_address]:
+            token = state_manager.address_to_token[addr]
             allowance = strategy_config['allowance'][addr]
-            holdings = state_manager.address_to_token_holdings[addr]
+            holdings = token.get_wallet_balance(self.wallet_address)
             if allowance > holdings:
                 raise ValueError(f'Allowance ({allowance}) must be less than holdings ({holdings}). Violating token: {addr}')
 
@@ -107,7 +124,7 @@ class BinanceAlphaTokenPairStrategy(Strategy):
         self.order_id_to_alpha_direction: Dict[int, AlphaDirection] = {}
 
         self.pending_order_ids: Set[int] = set()
-    
+        
     def on_state_update(self, state_manager: StateManager) -> List[Order]:
         if len(self.pending_order_ids) > 0:
             logging.warning(f'Not generating orders because we are pending receipt for our orders: {self.pending_order_ids}')
@@ -117,6 +134,7 @@ class BinanceAlphaTokenPairStrategy(Strategy):
         if simple_alpha is None:
             logging.warning('Binance alpha is null (not yet initialized)...')
             return []
+        logging.info(f'Simple alpha = {simple_alpha}')
         open_decision = self.trigger_container.decide_should_open_position(alpha_bps=simple_alpha.alpha_bps)
 
         orders = []
@@ -158,7 +176,7 @@ class BinanceAlphaTokenPairStrategy(Strategy):
     def on_our_trades(self, state_manager: StateManager, new_trades: List[Trade]):
         filled_order_ids = set([trade.order_id for trade in new_trades])
         self.pending_order_ids -= filled_order_ids
-        
+
         # We specify a path of length 2 and allow only one outstanding order at a time, so below must hold
         # Make sure to update this if we send multiple orders simultaneously!
         assert(len(self.pending_order_ids) == 0)
@@ -235,8 +253,9 @@ class BinanceAlphaTokenPairStrategy(Strategy):
             if cfg['type'] == 'stellaswap':
                 # Note that the USDC.usd_value() fluctuates a decent bit because any large trade changes it drastically
                 # So it needs to be smoothed!
-                decimals = state_manager.address_to_token_decimals[cfg['token_address']]
-                return state_manager.address_to_token[cfg['token_address']].get_usd_value() * 10**decimals
+                token = state_manager.address_to_token[cfg['token_address']]
+                decimals = token.decimals()
+                return token.get_usd_value() * 10**decimals
             if cfg['type'] == 'constant':
                 return cfg['value']
             raise ValueError('Should not reach here')
@@ -246,8 +265,8 @@ class BinanceAlphaTokenPairStrategy(Strategy):
 
         # We explicitly adjust the rate with decimals because all our quotes are in terms of wei
         token_pair = state_manager.address_to_token_pair[self.pair_address]
-        token0_decimals = state_manager.address_to_token_decimals[token_pair.token0_address]
-        token1_decimals = state_manager.address_to_token_decimals[token_pair.token1_address]
+        token0_decimals = state_manager.address_to_token[token_pair.token0_address].decimals()
+        token1_decimals = state_manager.address_to_token[token_pair.token1_address].decimals()
 
         return 10**(token1_decimals - token0_decimals) * (num / denom) if num is not None and denom is not None else None
 
@@ -277,6 +296,8 @@ class BinanceAlphaTokenPairStrategy(Strategy):
             int(self.risk * (in_token_pos.allowance + in_token_pos.cumulative_position_delta)),
             int(max_amount_in),
         )
+        amount_in = self._cap_amount_by_wallet_balance(amount_in, state_manager.address_to_token[path[0]])
+        
         amount_out_min = int(token_pair.quote_with_fees(
             trade_direction, amount_in=amount_in) * (1 - self.acceptable_slippage_bps / 10_000))
         new_order = self._create_order(amount_in, amount_out_min, path, state_manager, alpha)
@@ -289,12 +310,14 @@ class BinanceAlphaTokenPairStrategy(Strategy):
         # true if we had two consecutive (opposite side) open positions
         if self.token0_pos.open_position_amount > 0 and self.token1_pos.open_position_amount < 0:
             amount_in = self.token0_pos.open_position_amount
+            amount_in = self._cap_amount_by_wallet_balance(amount_in, state_manager.address_to_token[token_pair.token0_address])
             path = [token_pair.token0_address, token_pair.token1_address]
             amount_out_min = int(token_pair.quote_with_fees(
                 Direction.FORWARD, amount_in=amount_in) * (1 - self.acceptable_slippage_bps / 10_000))
             new_orders = [self._create_order(amount_in, amount_out_min, path, state_manager, alpha)]
         elif self.token0_pos.open_position_amount < 0 and self.token1_pos.open_position_amount > 0:
             amount_in = self.token1_pos.open_position_amount
+            amount_in = self._cap_amount_by_wallet_balance(amount_in, state_manager.address_to_token[token_pair.token1_address])
             path = [token_pair.token1_address, token_pair.token0_address]
             amount_out_min = int(token_pair.quote_with_fees(
                 Direction.REVERSE, amount_in=amount_in) * (1 - self.acceptable_slippage_bps / 10_000))
@@ -326,8 +349,8 @@ class BinanceAlphaTokenPairStrategy(Strategy):
             amount_in=amount_in,
             amount_out_min=amount_out_min,
             path=path,
-            block_num=state_manager.cur_block_num,
-            last_txn_index=state_manager.last_txn_index,
+            to=self.wallet_address,
+            deadline=state_manager.last_timestamp + self.order_timeout_seconds,
             metadata={
                 'input_usd_notional': amount_in * state_manager.address_to_token[path[0]].get_usd_value(),
                 **asdict(alpha),
@@ -337,65 +360,14 @@ class BinanceAlphaTokenPairStrategy(Strategy):
         self.order_id_to_alpha_direction[order.order_id] = alpha.alpha_direction
         return order
 
+    def _cap_amount_by_wallet_balance(self, amount_in: int, token: StellaswapTokenContainer) -> int:
+        wallet_balance = token.get_wallet_balance(self.wallet_address)
+        if 0.9 * wallet_balance < amount_in:
+            logging.warning(f'90% of Wallet balance ({wallet_balance}) is less than the desired amount_in ({amount_in}). '
+                            f'Setting the token upper bound to 90% of our wallet balance ({int(0.9 * wallet_balance)})')
+            amount_in = int(0.9 * wallet_balance)
+        return amount_in
+
     def _get_quote(self, state_manager: StateManager):
         token_pair = state_manager.address_to_token_pair[self.pair_address]
         return token_pair.quote_no_fees(Direction.FORWARD)
-
-
-if __name__ == '__main__':
-    from common.helpers import load_config
-    from simulation.trading_simulator import StateManager, FillEngine, PnlCalculator, SimDriver
-    import sys
-
-    config_name = sys.argv[1]
-    logging.info(f'Below results are for {config_name}')
-
-    config = load_config(filename='sim_cfg_expanded.yaml')
-    strategy_config = config['strategy']['binance_alpha'][config_name]
-
-    token_holdings = defaultdict(int)
-    for token_address, holdings in config['venue']['stellaswap']['holdings'].items():
-        token_holdings[token_address] = holdings
-
-    state_manager = StateManager(config, token_holdings)
-    fill_engine = FillEngine(should_update_state_reserves_after_trades=True)
-    pnl_calculator = PnlCalculator()
-    cycle_strategy = BinanceAlphaTokenPairStrategy(
-        strategy_config, state_manager
-    )
-    sim_driver = SimDriver(
-        state_manager=state_manager,
-        fill_engine=fill_engine,
-        pnl_calculator=pnl_calculator,
-        strategy=cycle_strategy,
-        should_trigger_strategy_on_end_of_block=True,
-        should_trigger_strategy_on_txn=False,
-    )
-
-    files = [
-        f'data/stellaswap_txn_history/all/stellaswap_data_{x}0000_{x}9999.feather' for x in range(165, 185)
-    ]
-    # binance_symbol_to_data_feather_files = {
-    #     'ETHUSDT': [f.replace(
-    #             'data/stellaswap_txn_history/all/stellaswap_data',
-    #             'data/binance_history/eth_usdt/processed/binance_data'
-    #         ) for f in files]
-    # }
-    # binance_symbol_to_data_feather_files = {
-    #     'BNBUSDT': [f.replace(
-    #             'data/stellaswap_txn_history/all/stellaswap_data',
-    #             'data/binance_history/bnb_usdt/processed/binance_data'
-    #         ) for f in files]
-    # }
-    binance_symbol_to_data_feather_files = {
-        'DOTUSDT': [f.replace(
-                'data/stellaswap_txn_history/all/stellaswap_data',
-                'data/binance_history/dot_usdt/processed/binance_data'
-            ) for f in files],
-        'GLMRUSDT': [f.replace(
-                'data/stellaswap_txn_history/all/stellaswap_data',
-                'data/binance_history/glmr_usdt/processed/binance_data'
-            ) for f in files],
-    }
-    sim_driver.process_files(files, binance_symbol_to_data_feather_files)
-    logging.info(f'Above results are for {config_name}')

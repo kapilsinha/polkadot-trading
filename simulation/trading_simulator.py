@@ -298,7 +298,7 @@ class Strategy(ABC):
         pass
 
     @abstractmethod
-    def on_filled_orders(self, state_manager: StateManager, new_trades: List[Trade]):
+    def on_our_trades(self, state_manager: StateManager, new_trades: List[Trade]):
         pass
 
 # Used in SimDriver to defer some action to the start of trigger_block_number
@@ -486,7 +486,7 @@ class SimDriver:
     def _handle_new_orders(self, new_orders: List[Order], block_number: int, txn_index: int):
         assert(len(new_orders) > 0) # this is already filtered in queue_new_orders
         new_trades = self.fill_engine.fill_orders(self.state_manager, new_orders)
-        self.strategy.on_filled_orders(self.state_manager, new_trades)
+        self.strategy.on_our_trades(self.state_manager, new_trades)
         successful_trades = [t for t in new_trades if t.is_success == True]
 
         self.pnl_calculator.calc_pnl(self.state_manager, successful_trades)

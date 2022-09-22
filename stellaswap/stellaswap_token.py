@@ -5,7 +5,7 @@ from smart_order_router.sor import single_sor_no_fees, single_sor_with_fees
 
 from dataclasses import dataclass
 import json
-import logging
+import numpy as np
 from timer import timer
 from typing import Dict, Optional
 import web3 as w3
@@ -68,6 +68,25 @@ class StellaswapTokenPairContainer:
         r0, r1 = (self.reserve0, self.reserve1) if direction == Direction.FORWARD else (self.reserve1, self.reserve0)
         amount_out = (amount_in * .9975 * r1) / (r0 + amount_in * .9975)
         return amount_out
+
+    def compute_trade_for_target_forward_quote(self, target_forward_quote: float):
+        cur_quote = self.quote_no_fees(Direction.FORWARD)
+        if target_forward_quote == cur_quote:
+            return None, 0, 0
+        if target_forward_quote < cur_quote:
+            # Forward direction trade decreases the quote (makes token1 scarcer, token0 more abundant), vice versa
+            direction = Direction.FORWARD
+            r0, r1 = self.reserve0, self.reserve1
+            rate = target_forward_quote
+        else:
+            direction = Direction.REVERSE
+            r0, r1 = self.reserve1, self.reserve0
+            rate = 1 / target_forward_quote
+        
+        # This baby was computed with the help of Wolfram Alpha
+        amount_in = (np.sqrt(r0 * (rate * r0 + 638400 * r1) / rate) - 799 * r0) / 798
+        amount_out = self.quote_with_fees(direction, amount_in)
+        return direction, amount_in, amount_out
     
     def dump(self):
         return {
@@ -107,7 +126,7 @@ class StellaswapTokenContainer:
             token_abi_path,
             web3,
         )
-        self.decimals = self.contract.functions.decimals().call()
+        self._decimals = self.contract.functions.decimals().call()
         if token_graph is not None:
             self.update(token_graph)
     
@@ -125,7 +144,7 @@ class StellaswapTokenContainer:
         return self.contract.functions.balanceOf(wallet_address).call()
 
     def decimals(self):
-        return self.decimals
+        return self._decimals
     
     def dump(self):
         return {

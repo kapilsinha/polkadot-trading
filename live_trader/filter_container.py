@@ -41,20 +41,24 @@ class FilterContainer(ABC):
         '''
         Returns True if we received (and handled) new entries, else False.
         '''
-        new_entries = self._get_new_entries(last_block_num)
+        new_entries = self._get_new_entries(last_block_num, 5)
         for entry in new_entries:
             self.handler(entry)
         return len(new_entries) > 0
 
-    def _get_new_entries(self, last_block_num) -> List[Any]:
+    def _get_new_entries(self, last_block_num, num_retries) -> List[Any]:
+        if num_retries < 0:
+            raise ValueError(f'Ran out of retries in filter._get_new_entries at block {last_block_num}')
+         
         try:
             new_entries = self.filter.get_new_entries()
         except ValueError as e:
             # catches errors of the type ValueError({'code': -32603, 'message': 'Filter id 25 does not exist.'})
             if len(e.args) > 0 and self.expired_filter_regex.match(e.args[0].get('message', '')) is not None:
-                logging.warning(f'Filter (id {self.filter_id}) expired, so we are creating a new one')
+                logging.warning(f'Filter (id {self.filter_id}) expired. '
+                                f'We will create a new filter ({num_retries} retries remaining)')
                 self.filter = self.create_filter(last_block_num)
-                new_entries = self.filter.get_new_entries()
+                new_entries = self._get_new_entries(last_block_num, num_retries - 1)
             else:
                 # Otherwise it's an unknown exception, and raise it again (crash the program)
                 raise e
@@ -62,15 +66,25 @@ class FilterContainer(ABC):
             # I have seen this error get thrown - I think due to a bug in the Web3Py library's decoding logic
             # Not sure how to handle it so we just try again
             if len(e.args) > 0 and e.args[0] == 'byte indices must be integers or slices, not str':
-                logging.error(f'Filter (id {self.filter_id}) received error {e}: {traceback.print_exc()}. We will try creating a new filter anyway')
+                logging.error(f'Filter (id {self.filter_id}) received error {e}: {traceback.print_exc()}. '
+                              f'We will create a new filter ({num_retries} retries remaining)')
                 self.filter = self.create_filter(last_block_num)
-                new_entries = self.filter.get_new_entries()
+                new_entries = self._get_new_entries(last_block_num, num_retries - 1)
             else:
                 raise e
         except asyncio.exceptions.TimeoutError as e:
             # I have seen this error periodically. Same handling as above
+            logging.error(f'Filter (id {self.filter_id}) received timeout error {e}. '
+                          f'We will create a new filter ({num_retries} retries remaining)')
             self.filter = self.create_filter(last_block_num)
-            new_entries = self.filter.get_new_entries()
+            new_entries = self._get_new_entries(last_block_num, num_retries - 1)
+        except w3.exceptions.MismatchedABI:
+            # I have seen this error periodically with the message 'The event signature did not match the provided ABI'
+            logging.error(f'Filter (id {self.filter_id}) received mismatched ABI error {e}. '
+                          f'We will create a new filter ({num_retries} retries remaining)')
+            self.filter = self.create_filter(last_block_num)
+            new_entries = self._get_new_entries(last_block_num, num_retries - 1)
+
         return new_entries
 
 

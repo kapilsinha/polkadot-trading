@@ -3,7 +3,7 @@ from live_trader.trade import Trade
 
 import logging
 import os
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 import web3
 
 logging.basicConfig(
@@ -46,21 +46,24 @@ class OrderSender:
         del self.pending_txn_to_order_id[txn_hash]
         return order_id
 
-    def send_orders_nonblocking(self, orders: List[Order]) -> List[str]:
+    def send_orders_nonblocking(self, orders: List[Order]) -> Tuple[bool, List[str]]:
+        '''
+        Returns True, [txn hashes] if orders were sent out. Else False, []
+        '''
         if not self.should_send_orders:
             logging.warning('NOT sending out orders because should_send_orders is False')
-            return []
+            return False, []
         glmr_balance = self.web3.eth.get_balance(self.wallet_address) * 1e-18
         if glmr_balance < self.min_glmr_balance:
             logging.warning(f'NOT sending out orders because GLMR balance ({glmr_balance}) is below '
                             f'threshold of {self.min_glmr_balance}. Add more GLMR to your wallet!')
-            return []
+            return False, []
         txn_hashes = [self._send_order(order) for order in orders]
         logging.warning(f'Sending out orders (waiting for txns to be mined): {txn_hashes}...')
-        return txn_hashes
+        return True, txn_hashes
 
-    def send_orders_blocking(self, orders: List[Order]) -> List[Trade]:
-        txn_hashes = self.send_orders_nonblocking(orders)
+    def send_orders_blocking(self, orders: List[Order]) -> Tuple[bool, List[Trade]]:
+        did_send_orders, txn_hashes = self.send_orders_nonblocking(orders)
         trades = []
         for txn_hash in txn_hashes:
             try:
@@ -71,9 +74,9 @@ class OrderSender:
             except web3.exceptions.TimeExhausted as e:
                 logging.error(f'Timed out waiting for txn receipt: {e}. '
                               f'The txn will likely be included in a later block and rejected, so we move on.')
-        if len(trades) > 0:
+        if did_send_orders:
             logging.warning(f'Finished executing orders: {trades}')
-        return trades
+        return did_send_orders, trades
 
     def _send_order(self, order: Order):
         nonce = self.web3.eth.get_transaction_count(self.wallet_address)

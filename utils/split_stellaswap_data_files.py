@@ -1,6 +1,9 @@
-# This script splits the StellaSwap data files by row type
-# Obviously it needs a main driver to run
+import os
+import glob
+import pandas as pd
 
+
+# This script splits the StellaSwap data files by row type
 def split_file(filename):
     d, f = os.path.split(filename)
     df = pd.read_feather(filename)
@@ -24,3 +27,9 @@ def split_file(filename):
         'amount1_delta': 'float64',
         **{equiv_col: 'float64' for equiv_col in df.columns if 'equiv' in equiv_col}
     }).to_feather(os.path.join(d, '../end_of_block_token', f))
+
+
+if __name__ == '__main__':
+    filenames = glob.glob('data/stellaswap_txn_history/all/stellaswap_data_18[5-9]*.feather')
+    for f in filenames:
+        split_file(f)

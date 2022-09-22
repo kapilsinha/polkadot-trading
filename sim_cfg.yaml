@@ -7,13 +7,13 @@ venue:
       - "0x27292cf0016E5dF1d8b37306B2A98588aCbD6fCA" # axlATOM 1608458
       - "0xfA9343C3897324496A05fC75abeD6bAC29f8A40f" # ETH_multi 13271113431432677
     holdings:
-      "0x818ec0A7Fe18Ff94269904fCED6AE3DaE6d6dC0b": 100059900 # USDC $100
-      "0xAcc15dC74880C9944775448304B263D191c6077F": 86170833928555164034 # wGLMR $50
+      "0x818ec0A7Fe18Ff94269904fCED6AE3DaE6d6dC0b": 50059900 # USDC $50
+      "0xAcc15dC74880C9944775448304B263D191c6077F": 8617083392855516403400 # 86170833928555164034 # wGLMR $50
       "0x0E358838ce72d5e61E0018a2ffaC4bEC5F4c88d2": 252737768152886094298 # STELLA $30
       "0x27292cf0016E5dF1d8b37306B2A98588aCbD6fCA": 1608458 # ATOM $25
       "0xfA9343C3897324496A05fC75abeD6bAC29f8A40f": 13271113431432677 # ETH $23
       "0xc9BAA8cfdDe8E328787E29b4B078abf2DaDc2055": 100000000000000000 # fake BNB holdings -> $30
-      "0xFfFFfFff1FcaCBd218EDc0EbA20Fc2308C778080": 100000000000 # fake xcDOT holdings -> $75
+      "0xFfFFfFff1FcaCBd218EDc0EbA20Fc2308C778080": 81727243835 # xcDOT holdings -> $50
     data_path:
       liquid_pairs: "data/stellaswap_liquid_pairs.csv"
       pair_metadata: "data/stellaswap_metadata_snapshot.csv"
@@ -88,6 +88,7 @@ strategy:
         "0x818ec0A7Fe18Ff94269904fCED6AE3DaE6d6dC0b": 30000000 # USDC_multi
       risk: 0.9
       max_our_trade_impact_rate_bps: 15
+      acceptable_slippage_bps: 10
       binance_quote_calculation:
         numerator:
           type: "constant"
@@ -113,36 +114,36 @@ strategy:
           price_delta_bps: -25
           alpha_bps: 25
     wglmr_xcdot:
-      pair_address: "0xa927E1e1E044CA1D9fe1854585003477331fE2Af"
+      acceptable_slippage_bps: 10
       allow_consecutive_same_side_orders: false
-      allow_opposite_side_order_to_close: true
+      allow_opposite_side_order_to_close: false
       allowance:
-        "0xAcc15dC74880C9944775448304B263D191c6077F": 86170833928555164034
-        "0xFfFFfFff1FcaCBd218EDc0EbA20Fc2308C778080": 100000000000 # fake xcDOT holdings
-      risk: 0.9
-      max_our_trade_impact_rate_bps: 15
+        '0xAcc15dC74880C9944775448304B263D191c6077F': 80000000000000000000
+        '0xFfFFfFff1FcaCBd218EDc0EbA20Fc2308C778080': 80000000000
       binance_quote_calculation:
-        numerator:
-          type: "binance"
-          symbol: "GLMRUSDT"
-          price_exp_smooth_factor: 0.1
         denominator:
-          type: "binance"
-          symbol: "DOTUSDT"
-          price_data_pull_rate_seconds: 3 # only used in prod
-          price_exp_smooth_factor: 0.1 # 1
+          price_data_pull_rate_seconds: 3
+          price_exp_smooth_factor: 0.5
+          symbol: DOTUSDT
+          type: binance
+        numerator:
+          price_exp_smooth_factor: 0.5
+          symbol: GLMRUSDT
+          type: binance
+      max_our_trade_impact_rate_bps: 4.5 | 9 | 13.5 | 18
+      pair_address: '0xa927E1e1E044CA1D9fe1854585003477331fE2Af'
+      risk: 0.9
+      trigger_close_order:
+      - alpha_bps: 0
+        name: combined_price_alpha_growth_target
+        price_delta_bps: 96
+      - alpha_bps: 6
+        name: combined_price_alpha_decay_target
+        price_delta_bps: 70
+      - alpha_bps: 0
+        name: combined_price_alpha_stop_loss
+        price_delta_bps: -37
       trigger_open_order:
-        name: "price_movement_predictor"
-        alpha_bps: 125
-      trigger_close_order: # OR of the following list (any trigger closes the order)
-        - name: "alpha_reversal"
-          alpha_bps: -15
-        - name: "combined_price_alpha_decay_target" # AND of the following conditions
-          price_delta_bps: 60
-          alpha_bps: 15
-        - name: "combined_price_alpha_growth_target" # AND of the following conditions
-          price_delta_bps: 65
-          alpha_bps: 35
-        - name: "combined_price_alpha_stop_loss" # AND of the following conditions
-          price_delta_bps: -25
-          alpha_bps: 25
+        alpha_bps: 80
+        name: price_movement_predictor
+
