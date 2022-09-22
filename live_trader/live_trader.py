@@ -262,6 +262,7 @@ def binance_alpha_main(rpc_provider: str, token_pair_name: str):
 
     config = load_config()
     strategy_config = config['strategy']['binance_alpha'][token_pair_name]
+    logging.info(f'Strategy config: {strategy_config}')
     
     binance_price_event_generators = []
     client = Spot()
