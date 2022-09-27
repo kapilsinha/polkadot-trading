@@ -104,6 +104,9 @@ class LiveTrader:
                                   f'Sleeping for 1 second and will retry ({num_retries} retries left).')
                 else:
                     raise e
+            except w3.exceptions.BlockNotFound as e:
+                logging.error(f'Block handler received "unknown block" with error {e}. '
+                              f'Sleeping for 1 second and will retry ({num_retries} retries left).')
             sleep(1)
             num_retries -= 1
         raise SystemError("Ran out of retries")
